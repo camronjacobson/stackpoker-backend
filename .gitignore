@@ -1,0 +1,39 @@
+# ─── Secrets ──────────────────────────────────────────────────────────────────
+# .env holds DATABASE_URL, JWT_SECRET, JWT_REFRESH_SECRET, REDIS_URL.
+# Never commit these — leak = full account takeover for every user.
+# .env.example is fine to commit (template with placeholder values).
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# ─── Node / TypeScript build output ───────────────────────────────────────────
+node_modules/
+dist/
+build/
+*.tsbuildinfo
+coverage/
+.nyc_output/
+
+# ─── Runtime data ─────────────────────────────────────────────────────────────
+logs/
+*.log
+npm-debug.log*
+pids/
+*.pid
+*.seed
+
+# ─── Prisma ───────────────────────────────────────────────────────────────────
+# Generated client lives inside node_modules — already covered. Migrations
+# under prisma/migrations/ ARE committed; do not ignore them.
+prisma/.env
+
+# ─── macOS / IDE ──────────────────────────────────────────────────────────────
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# ─── Test artifacts ───────────────────────────────────────────────────────────
+.jest-cache/

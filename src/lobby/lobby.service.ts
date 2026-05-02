@@ -1,0 +1,565 @@
+import { PrismaClient } from '@prisma/client';
+import { redis } from '../index';
+import { serializeBigInt, logger } from '../shared/utils';
+import {
+  CreateTableRequest,
+  JoinTableRequest,
+  TableDetail,
+  TableListItem,
+} from './lobby.types';
+
+const prisma = new PrismaClient();
+
+// Redis key for online presence
+const onlineKey = (userId: string) => `online:${userId}`;
+const tablePlayersKey = (tableId: string) => `table_players:${tableId}`;
+
+// ─── Create Table ─────────────────────────────────────────────────────────────
+
+export async function createTable(ownerId: string, data: CreateTableRequest): Promise<TableDetail> {
+  const { name, maxPlayers, smallBlind, bigBlind, minBuyIn, maxBuyIn, isPrivate, clubId, gameType } = data;
+
+  // Validate blinds
+  if (bigBlind !== smallBlind * 2) {
+    throw { code: 'INVALID_BLINDS', message: 'Big blind must be exactly 2x the small blind' };
+  }
+  if (minBuyIn < bigBlind * 10) {
+    throw { code: 'INVALID_BUYIN', message: 'Min buy-in must be at least 10x the big blind' };
+  }
+  if (maxBuyIn < minBuyIn) {
+    throw { code: 'INVALID_BUYIN', message: 'Max buy-in must be >= min buy-in' };
+  }
+  if (maxPlayers < 2 || maxPlayers > 9) {
+    throw { code: 'INVALID_PLAYERS', message: 'Table must allow 2–9 players' };
+  }
+
+  // If clubId provided, verify membership
+  if (clubId) {
+    const member = await prisma.clubMember.findUnique({
+      where: { clubId_userId: { clubId, userId: ownerId } },
+    });
+    if (!member) throw { code: 'NOT_CLUB_MEMBER', message: 'You are not a member of this club' };
+  }
+
+  // NOTE: The "one active table per owner" limit has been removed. Users can
+  // now create multiple tables freely. If this needs to come back, gate it
+  // behind a config flag rather than an unconditional block.
+
+  const table = await prisma.pokerTable.create({
+    data: {
+      name: name.trim(),
+      ownerId,
+      clubId: clubId || null,
+      maxPlayers,
+      smallBlind: BigInt(smallBlind),
+      bigBlind: BigInt(bigBlind),
+      minBuyIn: BigInt(minBuyIn),
+      maxBuyIn: BigInt(maxBuyIn),
+      isPrivate,
+      gameType: gameType || 'TEXAS_HOLDEM',
+      status: 'WAITING',
+    },
+    include: {
+      owner: { select: { id: true, username: true, displayName: true, avatarId: true } },
+      sessions: {
+        where: { isActive: true },
+        include: { user: { select: { id: true, username: true, displayName: true, avatarId: true } } },
+      },
+      club: { select: { name: true } },
+    },
+  });
+
+  logger.info(`Table created: "${table.name}" (${table.id}) by ${ownerId}`);
+  return serializeBigInt(formatTableDetail(table)) as TableDetail;
+}
+
+// ─── Get Table Detail ─────────────────────────────────────────────────────────
+
+export async function getTableDetail(tableId: string, requestingUserId?: string): Promise<TableDetail> {
+  const table = await prisma.pokerTable.findUnique({
+    where: { id: tableId },
+    include: {
+      owner: { select: { id: true, username: true, displayName: true, avatarId: true } },
+      sessions: {
+        where: { isActive: true },
+        orderBy: { seatIndex: 'asc' },
+        include: { user: { select: { id: true, username: true, displayName: true, avatarId: true } } },
+      },
+      club: { select: { name: true } },
+    },
+  });
+
+  if (!table) throw { code: 'NOT_FOUND', message: 'Table not found' };
+
+  // Private table — only show to members/owner
+  if (table.isPrivate && requestingUserId) {
+    const isMember = table.sessions.some(s => s.userId === requestingUserId);
+    const isOwner = table.ownerId === requestingUserId;
+    if (!isMember && !isOwner) {
+      throw { code: 'FORBIDDEN', message: 'This is a private table' };
+    }
+  }
+
+  return serializeBigInt(formatTableDetail(table)) as TableDetail;
+}
+
+// ─── List Tables ──────────────────────────────────────────────────────────────
+
+export async function listTables(filters: {
+  status?: string;
+  clubId?: string;
+  page?: number;
+  limit?: number;
+}): Promise<{ tables: TableListItem[]; total: number }> {
+  const { status = 'WAITING', clubId, page = 1, limit = 20 } = filters;
+  const skip = (page - 1) * limit;
+
+  const where = {
+    isPrivate: false,
+    status: status as any,
+    ...(clubId ? { clubId } : {}),
+  };
+
+  const [tables, total] = await Promise.all([
+    prisma.pokerTable.findMany({
+      where,
+      skip,
+      take: limit,
+      orderBy: { createdAt: 'desc' },
+      include: {
+        owner: { select: { username: true, avatarId: true } },
+        sessions: { where: { isActive: true }, select: { id: true } },
+        club: { select: { name: true } },
+      },
+    }),
+    prisma.pokerTable.count({ where }),
+  ]);
+
+  return {
+    tables: tables.map(t => serializeBigInt({
+      id: t.id,
+      name: t.name,
+      joinCode: t.joinCode,
+      status: t.status,
+      maxPlayers: t.maxPlayers,
+      currentPlayers: t.sessions.length,
+      smallBlind: t.smallBlind.toString(),
+      bigBlind: t.bigBlind.toString(),
+      minBuyIn: t.minBuyIn.toString(),
+      maxBuyIn: t.maxBuyIn.toString(),
+      isPrivate: t.isPrivate,
+      ownerUsername: t.owner.username,
+      ownerAvatarId: t.owner.avatarId,
+      clubId: t.clubId,
+      clubName: t.club?.name,
+      gameType: (t as any).gameType ?? 'TEXAS_HOLDEM',
+      createdAt: t.createdAt.toISOString(),
+    })) as unknown as TableListItem[],
+    total,
+  };
+}
+
+// ─── Join Table by Code ───────────────────────────────────────────────────────
+
+export async function joinTableByCode(
+  userId: string,
+  joinCode: string,
+  data: JoinTableRequest
+): Promise<TableDetail> {
+  const table = await prisma.pokerTable.findUnique({
+    where: { joinCode },
+    include: {
+      sessions: { where: { isActive: true } },
+      owner: { select: { id: true, username: true, displayName: true, avatarId: true } },
+    },
+  });
+
+  if (!table) throw { code: 'INVALID_CODE', message: 'No table found with that code' };
+  if (table.status === 'CLOSED') throw { code: 'TABLE_CLOSED', message: 'This table is closed' };
+  if (table.status === 'IN_PROGRESS') throw { code: 'GAME_IN_PROGRESS', message: 'A game is already in progress' };
+
+  return joinTable(userId, table.id, data);
+}
+
+// ─── Join Table by ID ─────────────────────────────────────────────────────────
+
+export async function joinTable(
+  userId: string,
+  tableId: string,
+  data: JoinTableRequest
+): Promise<TableDetail> {
+  const { buyInAmount, seatIndex } = data;
+
+  const table = await prisma.pokerTable.findUnique({
+    where: { id: tableId },
+    include: { sessions: { where: { isActive: true } } },
+  });
+
+  if (!table) throw { code: 'NOT_FOUND', message: 'Table not found' };
+  if (table.status === 'CLOSED') throw { code: 'TABLE_CLOSED', message: 'This table is closed' };
+
+  // Validate buy-in
+  if (buyInAmount < Number(table.minBuyIn)) {
+    throw { code: 'INVALID_BUYIN', message: `Minimum buy-in is ${table.minBuyIn}` };
+  }
+  if (buyInAmount > Number(table.maxBuyIn)) {
+    throw { code: 'INVALID_BUYIN', message: `Maximum buy-in is ${table.maxBuyIn}` };
+  }
+
+  // Check table isn't full
+  if (table.sessions.length >= table.maxPlayers) {
+    throw { code: 'TABLE_FULL', message: 'This table is full' };
+  }
+
+  // Check user isn't already seated
+  const alreadySeated = table.sessions.some(s => s.userId === userId);
+  if (alreadySeated) throw { code: 'ALREADY_SEATED', message: 'You are already at this table' };
+
+  // Determine seat
+  const takenSeats = new Set(table.sessions.map(s => s.seatIndex));
+  let seat = seatIndex;
+  if (seat === undefined || takenSeats.has(seat)) {
+    // Auto-assign first available seat
+    for (let i = 0; i < table.maxPlayers; i++) {
+      if (!takenSeats.has(i)) { seat = i; break; }
+    }
+  }
+  if (seat === undefined) throw { code: 'TABLE_FULL', message: 'No seats available' };
+
+  // Deduct chips in a transaction
+  const user = await prisma.user.findUnique({ where: { id: userId } });
+  if (!user) throw { code: 'NOT_FOUND', message: 'User not found' };
+
+  if (user.chipBalance < BigInt(buyInAmount)) {
+    throw { code: 'INSUFFICIENT_CHIPS', message: 'Not enough chips for this buy-in' };
+  }
+
+  await prisma.$transaction([
+    prisma.user.update({
+      where: { id: userId },
+      data: { chipBalance: { decrement: BigInt(buyInAmount) } },
+    }),
+    prisma.tableSession.create({
+      data: {
+        tableId,
+        userId,
+        seatIndex: seat,
+        buyInAmount: BigInt(buyInAmount),
+        currentStack: BigInt(buyInAmount),
+        isActive: true,
+      },
+    }),
+    prisma.chipTransaction.create({
+      data: {
+        recipientId: userId,
+        amount: BigInt(-buyInAmount),
+        type: 'BUY_IN',
+        tableId,
+        description: `Buy-in to table "${table.name}"`,
+      },
+    }),
+  ]);
+
+  logger.info(`User ${userId} joined table ${tableId} with ${buyInAmount} chips at seat ${seat}`);
+  return getTableDetail(tableId, userId);
+}
+
+// ─── Leave Table ──────────────────────────────────────────────────────────────
+
+export async function leaveTable(userId: string, tableId: string): Promise<{ chipsReturned: string }> {
+  const session = await prisma.tableSession.findUnique({
+    where: { tableId_userId: { tableId, userId } },
+  });
+
+  if (!session || !session.isActive) {
+    throw { code: 'NOT_AT_TABLE', message: 'You are not at this table' };
+  }
+
+  const table = await prisma.pokerTable.findUnique({ where: { id: tableId } });
+  if (table?.status === 'IN_PROGRESS') {
+    throw { code: 'GAME_IN_PROGRESS', message: 'Cannot leave during a hand. Wait for the hand to end.' };
+  }
+
+  const stack = session.currentStack;
+
+  await prisma.$transaction([
+    prisma.tableSession.update({
+      where: { id: session.id },
+      data: { isActive: false, leftAt: new Date() },
+    }),
+    prisma.user.update({
+      where: { id: userId },
+      data: { chipBalance: { increment: stack } },
+    }),
+    prisma.chipTransaction.create({
+      data: {
+        recipientId: userId,
+        amount: stack,
+        type: 'CASH_OUT',
+        tableId,
+        description: `Cash out from table`,
+      },
+    }),
+  ]);
+
+  // Close table if owner left and no other players
+  const remaining = await prisma.tableSession.count({
+    where: { tableId, isActive: true },
+  });
+  if (remaining === 0) {
+    await prisma.pokerTable.update({
+      where: { id: tableId },
+      data: { status: 'CLOSED', closedAt: new Date() },
+    });
+  }
+
+  logger.info(`User ${userId} left table ${tableId}, returned ${stack} chips`);
+  return { chipsReturned: stack.toString() };
+}
+
+// ─── Top Up Chips (mid-table rebuy) ───────────────────────────────────────────
+// Lets a seated player add chips to their stack between hands. Blocked
+// while a hand is in progress (you can't rebuy mid-action without
+// distorting the game state). Total stack after top-up cannot exceed
+// the table's maxBuyIn so cash-game rules hold.
+
+export async function topUpChips(
+  userId: string,
+  tableId: string,
+  amount: number
+): Promise<{ newStack: string; addedAmount: string }> {
+  if (!Number.isInteger(amount) || amount <= 0) {
+    throw { code: 'INVALID_AMOUNT', message: 'Top-up amount must be a positive integer' };
+  }
+
+  const session = await prisma.tableSession.findUnique({
+    where: { tableId_userId: { tableId, userId } },
+  });
+  if (!session || !session.isActive) {
+    throw { code: 'NOT_AT_TABLE', message: 'You are not seated at this table' };
+  }
+
+  const table = await prisma.pokerTable.findUnique({ where: { id: tableId } });
+  if (!table) throw { code: 'NOT_FOUND', message: 'Table not found' };
+  if (table.status === 'CLOSED') {
+    throw { code: 'TABLE_CLOSED', message: 'This table is closed' };
+  }
+  if (table.status === 'IN_PROGRESS') {
+    throw { code: 'GAME_IN_PROGRESS', message: 'Cannot add chips during a hand. Try again after the hand ends.' };
+  }
+
+  const newStack = session.currentStack + BigInt(amount);
+  if (newStack > table.maxBuyIn) {
+    throw {
+      code: 'EXCEEDS_MAX_BUYIN',
+      message: `Stack cannot exceed table max buy-in of ${table.maxBuyIn}`,
+    };
+  }
+
+  const user = await prisma.user.findUnique({ where: { id: userId } });
+  if (!user) throw { code: 'NOT_FOUND', message: 'User not found' };
+  if (user.chipBalance < BigInt(amount)) {
+    throw { code: 'INSUFFICIENT_CHIPS', message: 'Not enough chips for this top-up' };
+  }
+
+  await prisma.$transaction([
+    prisma.user.update({
+      where: { id: userId },
+      data: { chipBalance: { decrement: BigInt(amount) } },
+    }),
+    prisma.tableSession.update({
+      where: { id: session.id },
+      data: { currentStack: newStack },
+    }),
+    prisma.chipTransaction.create({
+      data: {
+        recipientId: userId,
+        amount:      BigInt(-amount),
+        type:        'BUY_IN',
+        tableId,
+        description: `Top-up at table "${table.name}"`,
+      },
+    }),
+  ]);
+
+  logger.info(`User ${userId} topped up ${amount} chips at table ${tableId} (new stack ${newStack})`);
+  return {
+    newStack:    newStack.toString(),
+    addedAmount: String(amount),
+  };
+}
+
+// ─── Send Table Invite ────────────────────────────────────────────────────────
+
+export async function sendTableInvite(
+  senderId: string,
+  tableId: string,
+  recipientId: string
+): Promise<void> {
+  const [table, recipient, friendship] = await Promise.all([
+    prisma.pokerTable.findUnique({ where: { id: tableId } }),
+    prisma.user.findUnique({ where: { id: recipientId } }),
+    prisma.friendship.findFirst({
+      where: {
+        OR: [
+          { senderId, receiverId: recipientId, status: 'ACCEPTED' },
+          { senderId: recipientId, receiverId: senderId, status: 'ACCEPTED' },
+        ],
+      },
+    }),
+  ]);
+
+  if (!table) throw { code: 'NOT_FOUND', message: 'Table not found' };
+  if (!recipient) throw { code: 'NOT_FOUND', message: 'User not found' };
+  if (!friendship) throw { code: 'NOT_FRIENDS', message: 'You can only invite friends' };
+
+  // Check for existing pending invite
+  const existing = await prisma.tableInvite.findFirst({
+    where: { tableId, senderId, recipientId, status: 'PENDING' },
+  });
+  if (existing) throw { code: 'INVITE_EXISTS', message: 'Invite already sent' };
+
+  await prisma.tableInvite.create({
+    data: {
+      tableId,
+      senderId,
+      recipientId,
+      expiresAt: new Date(Date.now() + 5 * 60 * 1000), // 5 minutes
+    },
+  });
+}
+
+// ─── Get Pending Invites ──────────────────────────────────────────────────────
+
+export async function getPendingInvites(userId: string) {
+  const invites = await prisma.tableInvite.findMany({
+    where: {
+      recipientId: userId,
+      status: 'PENDING',
+      expiresAt: { gt: new Date() },
+    },
+    include: {
+      table: {
+        select: {
+          id: true, name: true, joinCode: true,
+          smallBlind: true, bigBlind: true, maxPlayers: true,
+          sessions: { where: { isActive: true }, select: { id: true } },
+        },
+      },
+      sender: { select: { id: true, username: true, displayName: true, avatarId: true } },
+    },
+    orderBy: { createdAt: 'desc' },
+  });
+
+  return serializeBigInt(invites.map(inv => ({
+    id: inv.id,
+    status: inv.status,
+    expiresAt: inv.expiresAt,
+    createdAt: inv.createdAt,
+    table: {
+      id: inv.table.id,
+      name: inv.table.name,
+      joinCode: inv.table.joinCode,
+      smallBlind: inv.table.smallBlind.toString(),
+      bigBlind: inv.table.bigBlind.toString(),
+      currentPlayers: inv.table.sessions.length,
+      maxPlayers: inv.table.maxPlayers,
+    },
+    sender: inv.sender,
+  })));
+}
+
+// ─── Respond to Invite ────────────────────────────────────────────────────────
+
+export async function respondToInvite(
+  userId: string,
+  inviteId: string,
+  accept: boolean
+): Promise<{ joinCode?: string }> {
+  const invite = await prisma.tableInvite.findUnique({
+    where: { id: inviteId },
+    include: { table: true },
+  });
+
+  if (!invite) throw { code: 'NOT_FOUND', message: 'Invite not found' };
+  if (invite.recipientId !== userId) throw { code: 'FORBIDDEN', message: 'Not your invite' };
+  if (invite.status !== 'PENDING') throw { code: 'INVITE_EXPIRED', message: 'Invite already responded to' };
+  if (invite.expiresAt < new Date()) {
+    await prisma.tableInvite.update({ where: { id: inviteId }, data: { status: 'EXPIRED' } });
+    throw { code: 'INVITE_EXPIRED', message: 'Invite has expired' };
+  }
+
+  await prisma.tableInvite.update({
+    where: { id: inviteId },
+    data: { status: accept ? 'ACCEPTED' : 'DECLINED' },
+  });
+
+  return accept ? { joinCode: invite.table.joinCode } : {};
+}
+
+// ─── Close Table (owner only) ─────────────────────────────────────────────────
+
+export async function closeTable(ownerId: string, tableId: string): Promise<void> {
+  const table = await prisma.pokerTable.findUnique({
+    where: { id: tableId },
+    include: { sessions: { where: { isActive: true } } },
+  });
+
+  if (!table) throw { code: 'NOT_FOUND', message: 'Table not found' };
+  if (table.ownerId !== ownerId) throw { code: 'FORBIDDEN', message: 'Only the table owner can close it' };
+  if (table.status === 'CLOSED') throw { code: 'ALREADY_CLOSED', message: 'Table is already closed' };
+  if (table.status === 'IN_PROGRESS') throw { code: 'GAME_IN_PROGRESS', message: 'Cannot close table during a hand' };
+
+  // Return chips to all seated players
+  await prisma.$transaction([
+    ...table.sessions.map(session =>
+      prisma.user.update({
+        where: { id: session.userId },
+        data: { chipBalance: { increment: session.currentStack } },
+      })
+    ),
+    ...table.sessions.map(session =>
+      prisma.tableSession.update({
+        where: { id: session.id },
+        data: { isActive: false, leftAt: new Date() },
+      })
+    ),
+    prisma.pokerTable.update({
+      where: { id: tableId },
+      data: { status: 'CLOSED', closedAt: new Date() },
+    }),
+  ]);
+}
+
+// ─── Format Helper ────────────────────────────────────────────────────────────
+
+function formatTableDetail(table: any): any {
+  return {
+    id: table.id,
+    name: table.name,
+    joinCode: table.joinCode,
+    status: table.status,
+    maxPlayers: table.maxPlayers,
+    currentPlayers: table.sessions?.length ?? 0,
+    smallBlind: table.smallBlind.toString(),
+    bigBlind: table.bigBlind.toString(),
+    minBuyIn: table.minBuyIn.toString(),
+    maxBuyIn: table.maxBuyIn.toString(),
+    isPrivate: table.isPrivate,
+    gameType: table.gameType ?? 'TEXAS_HOLDEM',
+    clubId: table.clubId,
+    clubName: table.club?.name,
+    owner: table.owner,
+    players: (table.sessions ?? []).map((s: any) => ({
+      userId: s.userId,
+      username: s.user?.username,
+      displayName: s.user?.displayName,
+      avatarId: s.user?.avatarId,
+      seatIndex: s.seatIndex,
+      stack: s.currentStack.toString(),
+      isActive: s.isActive,
+      joinedAt: s.joinedAt,
+    })),
+    createdAt: table.createdAt,
+  };
+}

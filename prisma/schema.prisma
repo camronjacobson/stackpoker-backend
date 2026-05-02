@@ -1,0 +1,326 @@
+// StackPoker Database Schema
+// PostgreSQL via Prisma ORM
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─── USERS ──────────────────────────────────────────────────────────────────
+
+model User {
+  id            String    @id @default(uuid())
+  email         String?   @unique
+  appleId       String?   @unique
+  passwordHash  String?
+  username      String    @unique
+  displayName   String
+  avatarId      String    @default("avatar_1")
+  avatarUrl     String?
+  chipBalance   BigInt    @default(10000)
+  totalWon      BigInt    @default(0)
+  totalLost     BigInt    @default(0)
+  handsPlayed   Int       @default(0)
+  gamesPlayed   Int       @default(0)
+  isAdmin       Boolean   @default(false)
+  isBanned      Boolean   @default(false)
+  banReason     String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  lastSeenAt    DateTime  @default(now())
+
+  // Relations
+  sessions          Session[]
+  ownedTables       PokerTable[]         @relation("TableOwner")
+  tableSessions     TableSession[]
+  sentFriendships   Friendship[]         @relation("FriendshipSender")
+  receivedFriendships Friendship[]       @relation("FriendshipReceiver")
+  ownedClubs        Club[]               @relation("ClubOwner")
+  clubMemberships   ClubMember[]
+  chipTransactionsSent     ChipTransaction[] @relation("ChipSender")
+  chipTransactionsReceived ChipTransaction[] @relation("ChipReceiver")
+  handHistories     HandHistory[]
+  clubMessages      ClubMessage[]
+  tableInvites      TableInvite[]        @relation("InviteRecipient")
+  sentInvites       TableInvite[]        @relation("InviteSender")
+
+  @@map("users")
+}
+
+// ─── SESSIONS ───────────────────────────────────────────────────────────────
+
+model Session {
+  id           String   @id @default(uuid())
+  userId       String
+  refreshToken String   @unique
+  deviceId     String?
+  deviceName   String?
+  ipAddress    String?
+  userAgent    String?
+  expiresAt    DateTime
+  createdAt    DateTime @default(now())
+  revokedAt    DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("sessions")
+}
+
+// ─── POKER TABLES ───────────────────────────────────────────────────────────
+
+model PokerTable {
+  id            String       @id @default(uuid())
+  name          String
+  joinCode      String       @unique @default(cuid())
+  ownerId       String
+  clubId        String?
+  status        TableStatus  @default(WAITING)
+  maxPlayers    Int          @default(6)
+  smallBlind    BigInt       @default(10)
+  bigBlind      BigInt       @default(20)
+  minBuyIn      BigInt       @default(200)
+  maxBuyIn      BigInt       @default(2000)
+  currentHandId String?
+  gameType      String       @default("TEXAS_HOLDEM")
+  isPrivate     Boolean      @default(true)
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  closedAt      DateTime?
+
+  owner         User           @relation("TableOwner", fields: [ownerId], references: [id])
+  club          Club?          @relation(fields: [clubId], references: [id])
+  sessions      TableSession[]
+  hands         HandHistory[]
+  invites       TableInvite[]
+
+  @@map("poker_tables")
+}
+
+enum TableStatus {
+  WAITING
+  IN_PROGRESS
+  PAUSED
+  CLOSED
+}
+
+model TableSession {
+  id          String    @id @default(uuid())
+  tableId     String
+  userId      String
+  seatIndex   Int
+  buyInAmount BigInt
+  currentStack BigInt
+  isActive    Boolean   @default(true)
+  joinedAt    DateTime  @default(now())
+  leftAt      DateTime?
+
+  table PokerTable @relation(fields: [tableId], references: [id], onDelete: Cascade)
+  user  User       @relation(fields: [userId], references: [id])
+
+  @@unique([tableId, userId])
+  @@unique([tableId, seatIndex])
+  @@map("table_sessions")
+}
+
+// ─── TABLE INVITES ───────────────────────────────────────────────────────────
+
+model TableInvite {
+  id          String        @id @default(uuid())
+  tableId     String
+  senderId    String
+  recipientId String
+  status      InviteStatus  @default(PENDING)
+  createdAt   DateTime      @default(now())
+  expiresAt   DateTime
+
+  table     PokerTable @relation(fields: [tableId], references: [id], onDelete: Cascade)
+  sender    User       @relation("InviteSender", fields: [senderId], references: [id])
+  recipient User       @relation("InviteRecipient", fields: [recipientId], references: [id])
+
+  @@map("table_invites")
+}
+
+enum InviteStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+  EXPIRED
+}
+
+// ─── FRIENDSHIPS ────────────────────────────────────────────────────────────
+
+model Friendship {
+  id         String           @id @default(uuid())
+  senderId   String
+  receiverId String
+  status     FriendshipStatus @default(PENDING)
+  createdAt  DateTime         @default(now())
+  updatedAt  DateTime         @updatedAt
+
+  sender   User @relation("FriendshipSender", fields: [senderId], references: [id])
+  receiver User @relation("FriendshipReceiver", fields: [receiverId], references: [id])
+
+  @@unique([senderId, receiverId])
+  @@map("friendships")
+}
+
+enum FriendshipStatus {
+  PENDING
+  ACCEPTED
+  BLOCKED
+}
+
+// ─── CLUBS ──────────────────────────────────────────────────────────────────
+
+model Club {
+  id          String      @id @default(uuid())
+  name        String      @unique
+  description String?
+  avatarUrl   String?
+  ownerId     String
+  inviteCode  String      @unique @default(cuid())
+  isPublic    Boolean     @default(false)
+  maxMembers  Int         @default(50)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  owner   User         @relation("ClubOwner", fields: [ownerId], references: [id])
+  members ClubMember[]
+  tables  PokerTable[]
+  messages ClubMessage[]
+
+  @@map("clubs")
+}
+
+model ClubMember {
+  id       String    @id @default(uuid())
+  clubId   String
+  userId   String
+  role     ClubRole  @default(MEMBER)
+  joinedAt DateTime  @default(now())
+
+  // Leaderboard stats
+  totalWon   BigInt @default(0)
+  handsPlayed Int   @default(0)
+  rank        Int?
+
+  club Club @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id])
+
+  @@unique([clubId, userId])
+  @@map("club_members")
+}
+
+enum ClubRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+model ClubMessage {
+  id        String   @id @default(uuid())
+  clubId    String
+  userId    String
+  content   String
+  createdAt DateTime @default(now())
+  editedAt  DateTime?
+  deletedAt DateTime?
+
+  club Club @relation(fields: [clubId], references: [id], onDelete: Cascade)
+  user User @relation(fields: [userId], references: [id])
+
+  @@map("club_messages")
+}
+
+// ─── HAND HISTORY ────────────────────────────────────────────────────────────
+
+model HandHistory {
+  id          String   @id @default(uuid())
+  tableId     String
+  handNumber  Int
+  dealerId    String?
+  communityCards String[]
+  pot         BigInt
+  winnerId    String?
+  winnerIds   String[]
+  handStrength String?
+  duration    Int      // seconds
+  createdAt   DateTime @default(now())
+
+  table   PokerTable    @relation(fields: [tableId], references: [id])
+  winner  User?         @relation(fields: [winnerId], references: [id])
+  actions HandAction[]
+
+  @@map("hand_histories")
+}
+
+model HandAction {
+  id         String     @id @default(uuid())
+  handId     String
+  userId     String
+  actionType ActionType
+  amount     BigInt?
+  street     Street
+  position   Int
+  timestamp  DateTime   @default(now())
+
+  hand HandHistory @relation(fields: [handId], references: [id], onDelete: Cascade)
+
+  @@map("hand_actions")
+}
+
+enum ActionType {
+  FOLD
+  CHECK
+  CALL
+  RAISE
+  ALL_IN
+  SMALL_BLIND
+  BIG_BLIND
+  DEAL
+  SHOW
+  MUCK
+}
+
+enum Street {
+  PREFLOP
+  FLOP
+  TURN
+  RIVER
+  SHOWDOWN
+}
+
+// ─── CHIP TRANSACTIONS ───────────────────────────────────────────────────────
+
+model ChipTransaction {
+  id          String          @id @default(uuid())
+  senderId    String?
+  recipientId String
+  amount      BigInt
+  type        TransactionType
+  description String?
+  tableId     String?
+  handId      String?
+  createdAt   DateTime        @default(now())
+
+  sender    User? @relation("ChipSender", fields: [senderId], references: [id])
+  recipient User  @relation("ChipReceiver", fields: [recipientId], references: [id])
+
+  @@map("chip_transactions")
+}
+
+enum TransactionType {
+  SIGNUP_BONUS
+  DAILY_BONUS
+  WIN
+  LOSS
+  TRANSFER_SENT
+  TRANSFER_RECEIVED
+  BUY_IN
+  CASH_OUT
+  ADMIN_GRANT
+}
