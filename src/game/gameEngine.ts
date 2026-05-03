@@ -7,6 +7,19 @@ import {
 } from './gameState.types';
 import { logger } from '../shared/utils';
 
+// MAP: gameEngine — authoritative poker state machine (1108 lines)
+// - PokerGameEngine class .................. L20
+// - addPlayer .............................. L84
+// - showCard (voluntary fold-show) ......... L128
+// - startHand (deal, blinds, hole cards) ... L177
+// - processAction (action validator/router)  L267
+// - getLegalActions ........................ L316
+// - buildClientView (per-recipient filter) . L359
+// - foldPlayer (preserves seat.mucked) ..... L482
+// - raisePlayer ............................ L507
+// - advanceStreet (flop/turn/river) ........ L652
+// - endHand (showdown, payouts, reset) ..... L996
+
 // ─── Config ───────────────────────────────────────────────────────────────────
 
 const TURN_DURATION_MS  = 30_000;   // 30 seconds per turn
@@ -32,7 +45,7 @@ export class PokerGameEngine {
 
   constructor(
     tableId: string,
-    seats: Omit<Seat, 'holeCards' | 'betThisStreet' | 'totalContributed' | 'isDealer' | 'isSmallBlind' | 'isBigBlind' | 'lastActionAt'>[],
+    seats: Omit<Seat, 'holeCards' | 'mucked' | 'voluntaryShownCardIndices' | 'betThisStreet' | 'totalContributed' | 'isDealer' | 'isSmallBlind' | 'isBigBlind' | 'lastActionAt'>[],
     smallBlind: number,
     bigBlind: number,
     onStateChange: (state: ServerGameState) => void,
@@ -51,6 +64,8 @@ export class PokerGameEngine {
       seats:            seats.map(s => ({
         ...s,
         holeCards:        [],
+        mucked:           [],
+        voluntaryShownCardIndices: [],
         betThisStreet:    0,
         totalContributed: 0,
         isDealer:         false,
@@ -72,6 +87,7 @@ export class PokerGameEngine {
       lastAction:       null,
       winners:          null,
       handStartedAt:    0,
+      runOutBoard:      [],
     };
   }
 
@@ -79,12 +95,13 @@ export class PokerGameEngine {
 
   getState(): ServerGameState { return this.state; }
 
-  addPlayer(seat: Omit<Seat, 'holeCards'|'betThisStreet'|'totalContributed'|'isDealer'|'isSmallBlind'|'isBigBlind'|'lastActionAt'>): void {
+  addPlayer(seat: Omit<Seat, 'holeCards'|'mucked'|'voluntaryShownCardIndices'|'betThisStreet'|'totalContributed'|'isDealer'|'isSmallBlind'|'isBigBlind'|'lastActionAt'>): void {
     const exists = this.state.seats.find(s => s.userId === seat.userId);
     if (exists) { exists.stack = seat.stack; exists.isConnected = true; return; }
     this.state.seats.push({
       ...seat,
-      holeCards: [], betThisStreet: 0, totalContributed: 0,
+      holeCards: [], mucked: [], voluntaryShownCardIndices: [],
+      betThisStreet: 0, totalContributed: 0,
       isDealer: false, isSmallBlind: false, isBigBlind: false,
       lastActionAt: Date.now(),
     });
@@ -113,6 +130,26 @@ export class PokerGameEngine {
     if (!seat) return;
     seat.stack = stack;
     this.emit();
+  }
+
+  // Player tapped one of their own hole cards to expose it to the table.
+  // We accept the index ONLY when there is a hand to show (handNumber > 0)
+  // and the index is in range for whichever array currently holds the
+  // cards (mucked if folded, holeCards otherwise). Returns true if the
+  // index was newly added so the caller knows whether to broadcast — a
+  // duplicate tap is a no-op rather than an error so an over-eager double
+  // tap doesn't blow up the socket. Idempotent.
+  showCard(userId: string, cardIndex: number): boolean {
+    const seat = this.state.seats.find(s => s.userId === userId);
+    if (!seat) return false;
+    if (this.state.handNumber === 0) return false;
+    const sourceLength = seat.status === 'FOLDED'
+      ? seat.mucked.length
+      : seat.holeCards.length;
+    if (cardIndex < 0 || cardIndex >= sourceLength) return false;
+    if (seat.voluntaryShownCardIndices.includes(cardIndex)) return false;
+    seat.voluntaryShownCardIndices.push(cardIndex);
+    return true;
   }
 
   setConnected(userId: string, connected: boolean): void {
@@ -164,12 +201,21 @@ export class PokerGameEngine {
     this.state.winners        = null;
     this.state.lastAction     = null;
     this.state.handStartedAt  = Date.now();
+    // Stale "what would have been" board from the previous hand has to clear
+    // before fresh cards land — otherwise the iOS overlay would still offer
+    // the previous hand's run-out reveal on the new hand's empty board.
+    this.state.runOutBoard    = [];
 
     // Reset per-hand seat state
     for (const seat of this.state.seats) {
       if (seat.stack > 0 && seat.status !== 'SITTING_OUT') {
         seat.status          = 'ACTIVE';
         seat.holeCards       = [];
+        // Last-hand reveal state has to clear before fresh cards land — otherwise
+        // stale mucked cards from the previous hand would still flash to the
+        // table on the new deal.
+        seat.mucked          = [];
+        seat.voluntaryShownCardIndices = [];
         seat.betThisStreet   = 0;
         seat.totalContributed = 0;
         seat.isDealer        = false;
@@ -177,6 +223,10 @@ export class PokerGameEngine {
         seat.isBigBlind      = false;
       } else {
         seat.status = 'SITTING_OUT';
+        // Even players sitting out should drop any prior reveal state so a
+        // re-buy / re-seat starts clean.
+        seat.mucked = [];
+        seat.voluntaryShownCardIndices = [];
       }
     }
 
@@ -332,30 +382,87 @@ export class PokerGameEngine {
       isActive:         s.status !== 'FOLDED' && s.status !== 'SITTING_OUT',
     })));
 
-    const seats: ClientSeat[] = this.state.seats.map(s => ({
-      seatIndex:        s.seatIndex,
-      userId:           s.userId,
-      username:         s.username,
-      displayName:      s.displayName,
-      avatarId:         s.avatarId,
-      stack:            s.stack,
-      status:           s.status,
-      // Show hole cards only to the owner, or everyone at showdown
-      holeCards:
+    // ─── All-in showdown auto-reveal ──────────────────────────────────────────
+    // When every player still in the hand is committed (no chips left to bet
+    // by anyone, OR only one player has chips and everyone else is all-in),
+    // there can be no further betting and cards turn face-up immediately —
+    // the same way a live dealer announces "cards up" when nobody can act.
+    // We check the live (non-folded, non-sitting-out) seats: if at most one
+    // of them still has chips, all live hole cards are exposed regardless of
+    // `phase` so the iOS client can render them face-up on every street.
+    const liveSeats = this.state.seats.filter(
+      s => s.status === 'ACTIVE' || s.status === 'ALL_IN',
+    );
+    const liveSeatsWithChips = liveSeats.filter(s => s.stack > 0);
+    const isAllInShowdown =
+      liveSeats.length >= 2 && liveSeatsWithChips.length <= 1;
+
+    const seats: ClientSeat[] = this.state.seats.map(s => {
+      // Hole-card visibility rules:
+      //   1. The seat's own user always sees their own cards.
+      //   2. Other players see them ONLY at a real showdown (phase === 'SHOWDOWN').
+      //   3. Fold-wins do NOT reveal cards. When everyone-but-one folds, the engine
+      //      sets `winners` to end the hand but the phase is still PREFLOP/FLOP/etc.
+      //      Real poker rooms never auto-show the winner's hand in this case — the
+      //      winner can voluntarily show via the show_cards event, but mucking
+      //      face-down is the default.
+      //   4. All-in showdown (rule above) also reveals — same behaviour as a live
+      //      dealer turning cards up when no further betting is possible.
+      //   5. Folded players' holeCards are now stored in `mucked` (see
+      //      `foldPlayer`); they no longer auto-reveal at SHOWDOWN, only via
+      //      the voluntary `revealedCards` channel below.
+      // For the seat's own user we always return their cards, but after a
+      // fold the actual values now live in `mucked` (holeCards was cleared
+      // to keep "is this player still in the hand" checks honest). Without
+      // this branch the owner would see their own cards vanish on fold and
+      // wouldn't be able to tap-to-show. Other viewers never see mucked.
+      const ownerCards = s.status === 'FOLDED' ? s.mucked : s.holeCards;
+      const holeCards =
         s.userId === forUserId
-          ? s.holeCards
-          : (this.state.phase === 'SHOWDOWN' || this.state.winners !== null)
+          ? ownerCards
+          : this.state.phase === 'SHOWDOWN'
             ? s.holeCards
-            : null,
-      cardCount:        s.holeCards.length,
-      betThisStreet:    s.betThisStreet,
-      totalContributed: s.totalContributed,
-      isDealer:         s.isDealer,
-      isSmallBlind:     s.isSmallBlind,
-      isBigBlind:       s.isBigBlind,
-      timeBank:         s.timeBank,
-      isConnected:      s.isConnected,
-    }));
+            : isAllInShowdown
+              ? s.holeCards
+              : null;
+
+      // ─── Voluntarily revealed cards (visible to everyone) ───────────────
+      // The seat's owner has tapped specific card indices to expose. We look
+      // them up in whichever array currently holds the cards: holeCards for
+      // live seats, mucked for folded seats. Indices outside range are
+      // dropped silently — show_cards validates them too, but defence in
+      // depth is cheap.
+      const sourceCards = s.status === 'FOLDED' ? s.mucked : s.holeCards;
+      const revealedCards = s.voluntaryShownCardIndices
+        .filter(i => i >= 0 && i < sourceCards.length)
+        .map(i => ({ index: i, card: sourceCards[i] }));
+
+      return {
+        seatIndex:        s.seatIndex,
+        userId:           s.userId,
+        username:         s.username,
+        displayName:      s.displayName,
+        avatarId:         s.avatarId,
+        stack:            s.stack,
+        status:           s.status,
+        holeCards,
+        // Use mucked.length for folded players so opponents still see the
+        // correct face-down placeholder count (2 for Holdem, 4 for PLO) — a
+        // folded player whose cards have moved to `mucked` should still look
+        // like they had a hand, otherwise the seat visually empties.
+        cardCount:        s.status === 'FOLDED'
+                            ? s.mucked.length
+                            : s.holeCards.length,
+        revealedCards,
+        betThisStreet:    s.betThisStreet,
+        totalContributed: s.totalContributed,
+        isDealer:         s.isDealer,
+        isSmallBlind:     s.isSmallBlind,
+        isBigBlind:       s.isBigBlind,
+        timeBank:         s.timeBank,
+        isConnected:      s.isConnected,
+      };
+    });
 
     // Total span of the active player's turn (base duration + their time bank).
     // Clients divide (deadline − now) by this to draw the timer ring correctly.
@@ -385,6 +492,10 @@ export class PokerGameEngine {
       lastAction:      this.state.lastAction,
       winners:         this.state.winners,
       legalActions:    this.getLegalActions(forUserId),
+      // Gate the would-have-been-board on phase=ENDED so a curious client
+      // can't sniff future cards mid-hand by polling state. During live play
+      // and the next hand's WAITING window, we always emit an empty array.
+      revealableBoard: this.state.phase === 'ENDED' ? this.state.runOutBoard : [],
     };
   }
 
@@ -394,6 +505,12 @@ export class PokerGameEngine {
     const seat = this.state.seats.find(s => s.userId === userId);
     if (!seat) return;
     seat.status = 'FOLDED';
+    // Move the cards aside instead of wiping them. `holeCards` going to []
+    // preserves all the existing "is this player still in the hand" checks
+    // that look at length — but `mucked` keeps the actual values around so
+    // the player can voluntarily show one or both via the show_cards socket
+    // event. `mucked` is cleared at the start of the next hand reset.
+    seat.mucked = seat.holeCards;
     seat.holeCards = [];
   }
 
@@ -552,6 +669,43 @@ export class PokerGameEngine {
         this.state.communityCards.push(this.state.deck.shift()!);
         break;
     }
+  }
+
+  // Returns the cards that *would have been* dealt to fill the rest of the
+  // board, without touching the deck. Caller is responsible for only invoking
+  // this when the hand ends before the river — during live play the deck is
+  // already mid-deal and a "run-out" preview makes no sense. We mirror the
+  // exact burn pattern dealStreetCards uses (1 burn before the flop trio, 1
+  // before the turn, 1 before the river) so the cards we expose match what a
+  // real run-out would have produced if the hand continued.
+  private peekRunOutBoard(): Card[] {
+    const dealt = this.state.communityCards.length;
+    if (dealt >= 5) return [];
+
+    const result: Card[] = [];
+    let cursor = 0;
+    const take = (n: number): void => {
+      for (let k = 0; k < n; k++) {
+        const card = this.state.deck[cursor++];
+        if (card) result.push(card);
+      }
+    };
+    const burn = (): void => { cursor++; };
+
+    if (dealt === 0) {
+      // Preflop fold — show would-be flop, turn, and river
+      burn(); take(3);
+      burn(); take(1);
+      burn(); take(1);
+    } else if (dealt === 3) {
+      // Flop fold — show would-be turn + river
+      burn(); take(1);
+      burn(); take(1);
+    } else if (dealt === 4) {
+      // Turn fold — show would-be river
+      burn(); take(1);
+    }
+    return result;
   }
 
   private advanceStreet(): void {
@@ -918,7 +1072,14 @@ export class PokerGameEngine {
     let winners: WinnerPayout[] = [];
 
     if (contestants.length === 1) {
-      // Everyone folded → uncontested
+      // Everyone folded → uncontested. Surface the would-have-been board so
+      // the iOS layer can render face-down "tap to reveal" placeholders for
+      // the remaining streets. Only meaningful here — a contested showdown
+      // by definition reached the river (or got there via the all-in
+      // runout), so the board is already complete in those branches.
+      if (this.state.communityCards.length < 5) {
+        this.state.runOutBoard = this.peekRunOutBoard();
+      }
       const winner = contestants[0];
       const amount = totalPot(this.state.pots);
       winner.stack += amount;

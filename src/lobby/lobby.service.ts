@@ -176,7 +176,15 @@ export async function joinTableByCode(
 
   if (!table) throw { code: 'INVALID_CODE', message: 'No table found with that code' };
   if (table.status === 'CLOSED') throw { code: 'TABLE_CLOSED', message: 'This table is closed' };
-  if (table.status === 'IN_PROGRESS') throw { code: 'GAME_IN_PROGRESS', message: 'A game is already in progress' };
+
+  // Returning user with an active session bypasses the IN_PROGRESS gate — they
+  // already have a seat and chips committed. The downstream joinTable() also
+  // detects this and short-circuits to a no-op rejoin, but we need to skip the
+  // IN_PROGRESS throw here too so the rejoin actually reaches that code path.
+  const isRejoin = table.sessions.some(s => s.userId === userId);
+  if (table.status === 'IN_PROGRESS' && !isRejoin) {
+    throw { code: 'GAME_IN_PROGRESS', message: 'A game is already in progress' };
+  }
 
   return joinTable(userId, table.id, data);
 }
@@ -198,6 +206,18 @@ export async function joinTable(
   if (!table) throw { code: 'NOT_FOUND', message: 'Table not found' };
   if (table.status === 'CLOSED') throw { code: 'TABLE_CLOSED', message: 'This table is closed' };
 
+  // Idempotent rejoin: if the user already has an ACTIVE session at this table,
+  // treat the call as a graceful rejoin instead of failing with ALREADY_SEATED.
+  // This covers the "killed the app mid-hand, reopened, hit Join Game" flow
+  // where the in-memory `lastTable` was lost and the lobby UI doesn't know to
+  // route through `rejoinTable()`. We don't re-charge chips or create a new
+  // session — we just hand back the current detail so the iOS layer can
+  // navigate into the game where `join_table` over the websocket reconciles.
+  const existingSession = table.sessions.find(s => s.userId === userId);
+  if (existingSession) {
+    return getTableDetail(tableId, userId);
+  }
+
   // Validate buy-in
   if (buyInAmount < Number(table.minBuyIn)) {
     throw { code: 'INVALID_BUYIN', message: `Minimum buy-in is ${table.minBuyIn}` };
@@ -210,10 +230,6 @@ export async function joinTable(
   if (table.sessions.length >= table.maxPlayers) {
     throw { code: 'TABLE_FULL', message: 'This table is full' };
   }
-
-  // Check user isn't already seated
-  const alreadySeated = table.sessions.some(s => s.userId === userId);
-  if (alreadySeated) throw { code: 'ALREADY_SEATED', message: 'You are already at this table' };
 
   // Determine seat
   const takenSeats = new Set(table.sessions.map(s => s.seatIndex));

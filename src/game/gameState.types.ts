@@ -1,6 +1,17 @@
 import { Card } from './deck';
 import { PotSlice } from './potManager';
 
+// MAP: gameState.types — server/client shared shapes (179 lines)
+// - PlayerStatus / Street / GamePhase ...... L6-8
+// - Seat (server-side, has hole+mucked) .... L13
+// - LastAction ............................. L43
+// - ServerGameState ........................ L55
+// - WinnerPayout ........................... L78
+// - ClientGameState (per-recipient view) ... L89
+// - ClientSeat (filtered, has revealedCards) L113
+// - LegalAction ............................ L137
+// - WsEvent / WsMessage / payloads ......... L146-176
+
 // ─── Player Status ────────────────────────────────────────────────────────────
 
 export type PlayerStatus = 'WAITING' | 'ACTIVE' | 'FOLDED' | 'ALL_IN' | 'SITTING_OUT' | 'DISCONNECTED';
@@ -18,7 +29,15 @@ export interface Seat {
   avatarId:       string;
   stack:          number;
   status:         PlayerStatus;
-  holeCards:      Card[];          // server-only: actual cards
+  holeCards:      Card[];          // server-only: actual cards (cleared on fold)
+  // Cards as of fold — preserved so a folded player can voluntarily show them
+  // after the hand. Live (non-folded) seats keep [] here. Cleared at start of
+  // every new hand alongside the per-hand reset.
+  mucked:         Card[];
+  // Indices (into holeCards or mucked, whichever currently holds them) that
+  // the seat's owner has chosen to reveal to the table. Persists for the
+  // remainder of the hand display, cleared at start of next hand.
+  voluntaryShownCardIndices: number[];
   betThisStreet:  number;          // chips bet this street
   totalContributed: number;        // chips in pot this hand
   isDealer:       boolean;
@@ -65,6 +84,14 @@ export interface ServerGameState {
   lastAction:       LastAction | null;
   winners:          WinnerPayout[] | null;
   handStartedAt:    number;
+  // Cards that *would have been* dealt to complete the board if the hand had
+  // run out, populated only when a hand ends before the river (everyone
+  // folded preflop / on the flop / on the turn). Empty array during live
+  // play. Reset every startHand. Drives the iOS "tap to reveal what was
+  // next" feature so the hero can satisfy curiosity after a fold-win without
+  // changing actual game state. We deliberately gate this on `phase==ENDED`
+  // in buildClientView so mid-hand snapshots never leak future cards.
+  runOutBoard:      Card[];
 }
 
 export interface WinnerPayout {
@@ -100,6 +127,11 @@ export interface ClientGameState {
   winners:         WinnerPayout[] | null;
   // Legal actions for the requesting player
   legalActions:    LegalAction[];
+  // What the rest of the board would have been when the hand ended early
+  // (fold-out before the river). Empty array when the board ran out
+  // naturally or during live play. iOS renders these as face-down tappable
+  // placeholders that flip to reveal on tap.
+  revealableBoard: Card[];
 }
 
 export interface ClientSeat {
@@ -112,6 +144,11 @@ export interface ClientSeat {
   status:         PlayerStatus;
   holeCards:      Card[] | null;     // only set for the requesting user (or at showdown)
   cardCount:      number;            // for other players
+  // Cards this seat has voluntarily exposed to the whole table (fold-show
+  // tap, or auto-reveal on all-in showdown). Visible to every viewer; one
+  // entry per shown card with its original hand-position index so the UI
+  // can place it back over the right slot. Empty array = nothing shown.
+  revealedCards:  { index: number; card: Card }[];
   betThisStreet:  number;
   totalContributed: number;
   isDealer:       boolean;

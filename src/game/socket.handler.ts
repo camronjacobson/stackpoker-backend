@@ -8,6 +8,17 @@ import { PrismaClient } from '@prisma/client';
 import { generateBotReply, botTypingDelayMs } from './botChat';
 import * as lobbyService from '../lobby/lobby.service';
 
+// MAP: socket.handler — Socket.IO event routing for /game ns (382 lines)
+// - broadcastGameState (per-recipient view)  L164
+// - registerSocketHandlers (entry) ......... L175
+// - join_table ............................. L197
+// - player_action .......................... L250
+// - show_cards (voluntary fold-show) ....... L271
+// - leave_table ............................ L286
+// - table_chat ............................. L310
+// - admin_kick ............................. L343
+// - disconnect (with grace period) ......... L357
+
 const prisma = new PrismaClient();
 
 // Disconnect grace period — when a socket drops we don't immediately free
@@ -259,6 +270,27 @@ export function registerSocketHandlers(io: SocketServer): void {
       } catch (err) {
         logger.error('player_action error:', err);
         emit(socket, 'error', { code: 'SERVER_ERROR', message: 'Action failed' });
+      }
+    });
+
+    // Player tapped one of their own hole cards to voluntarily expose it.
+    // We trust the engine to validate the index range / hand state — the
+    // handler just relays and re-broadcasts so every viewer sees the
+    // updated `revealedCards` field at the affected seat. We do NOT echo
+    // a separate event; the per-recipient broadcastGameState already
+    // routes a fresh ClientGameState with the new reveal baked in.
+    socket.on('show_cards', (payload: { tableId: string; cardIndex: number }) => {
+      try {
+        const { tableId, cardIndex } = payload;
+        const engine = roomManager.get(tableId);
+        if (!engine) { emit(socket, 'error', { code: 'NO_GAME', message: 'No active game' }); return; }
+        const added = engine.showCard(userId, cardIndex);
+        if (!added) return; // bad index, no hand, or duplicate — silently ignore
+        markTableActive(tableId);
+        void broadcastGameState(io, tableId);
+      } catch (err) {
+        logger.error('show_cards error:', err);
+        emit(socket, 'error', { code: 'SERVER_ERROR', message: 'Show cards failed' });
       }
     });
 
