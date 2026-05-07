@@ -25,6 +25,12 @@ model User {
   totalWon      BigInt    @default(0)
   totalLost     BigInt    @default(0)
   handsPlayed   Int       @default(0)
+  // Voluntarily-put-money-in-pot count. Incremented per hand where the
+  // player called or raised preflop (BB checking through is NOT voluntary,
+  // so it does not increment). VPIP% is rendered client-side as
+  // vpipHands / handsPlayed. Stored as a counter rather than a percentage so
+  // we can recompute the ratio without losing precision over many hands.
+  vpipHands     Int       @default(0)
   gamesPlayed   Int       @default(0)
   isAdmin       Boolean   @default(false)
   isBanned      Boolean   @default(false)

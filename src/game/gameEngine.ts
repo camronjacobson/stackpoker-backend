@@ -27,6 +27,15 @@ const TIMEBANK_SECONDS  = 30;       // extra time bank
 const MIN_PLAYERS       = 2;
 const HAND_START_DELAY  = 6_000;    // ms after hand ends before new deal — gives the showdown reveal animation room to play
 const SHOWDOWN_DURATION = 5_000;    // ms to show cards before clearing
+// Pause inserted between the action that closes a betting round and the
+// advanceStreet() emit that zeros every seat's betThisStreet. Without this
+// delay both emits fire on the same Node tick → batched on one socket flush
+// → the client's view of the closing player's bet collapses 0 → X → 0 inside
+// a single SwiftUI animation transaction, so neither the chip-arrival nor
+// the chips-to-pot transition has a visible frame to render against. 700ms
+// is long enough for the spring on the bet-chip layer (response 0.65) to
+// nearly settle while still feeling snappy at the table.
+const CLOSE_ROUND_DELAY_MS = 700;
 
 // ─── Game Engine ─────────────────────────────────────────────────────────────
 
@@ -39,7 +48,23 @@ export class PokerGameEngine {
   // A betting round is complete only when every ACTIVE player is in this set
   // AND has matched the current bet. Cleared whenever currentBet increases.
   private actedSinceLastBet: Set<string> = new Set();
+  // Per-hand set of userIds who voluntarily put money in the pot during the
+  // PREFLOP street (CALL, RAISE, or ALL_IN). Cleared at the start of every
+  // hand. The roomManager reads this when persisting hand results to bump
+  // each user's `vpipHands` counter (the numerator of VPIP%).
+  // Posted blinds do NOT count — VPIP only credits voluntary action.
+  private voluntaryPreflopUserIds: Set<string> = new Set();
   private runoutTimer: NodeJS.Timeout | null = null;
+  // Delays advanceGame() when the just-applied action closes the betting
+  // round. Without this delay, the post-action emit (which carries the
+  // closing player's bet badge) and the subsequent advanceStreet emit
+  // (which zeros every betThisStreet to feed the pot) land on the same
+  // Node tick — Socket.IO batches them onto the same flush, the iOS
+  // client receives both states back-to-back, and SwiftUI collapses the
+  // closing player's bet 0 → X → 0 into a single non-animating transition.
+  // The bug presents as: "the caller's chips never visually arrive on the
+  // felt or fly to the pot, even though the pot reflects the right amount".
+  private closeRoundTimer: NodeJS.Timeout | null = null;
   private onStateChange: (state: ServerGameState) => void;
   private onHandEnd: (state: ServerGameState) => void;
 
@@ -94,6 +119,14 @@ export class PokerGameEngine {
   // ─── Public API ─────────────────────────────────────────────────────────────
 
   getState(): ServerGameState { return this.state; }
+
+  // Snapshot of userIds who voluntarily put money in preflop *during the
+  // hand that just finished*. Returned as an array (not the live Set) so
+  // callers can't mutate the engine's internal tracking. roomManager calls
+  // this immediately after onHandEnd and before the next hand resets it.
+  getVoluntaryPreflopUserIds(): string[] {
+    return Array.from(this.voluntaryPreflopUserIds);
+  }
 
   addPlayer(seat: Omit<Seat, 'holeCards'|'mucked'|'voluntaryShownCardIndices'|'betThisStreet'|'totalContributed'|'isDealer'|'isSmallBlind'|'isBigBlind'|'lastActionAt'>): void {
     const exists = this.state.seats.find(s => s.userId === seat.userId);
@@ -268,9 +301,11 @@ export class PokerGameEngine {
     this.state.phase = 'BETTING';
 
     // New hand: reset round-tracking state
-    this.actedSinceLastBet = new Set();
-    this.lastAggressorId   = null;
+    this.actedSinceLastBet      = new Set();
+    this.voluntaryPreflopUserIds = new Set();
+    this.lastAggressorId        = null;
     if (this.runoutTimer) { clearTimeout(this.runoutTimer); this.runoutTimer = null; }
+    if (this.closeRoundTimer) { clearTimeout(this.closeRoundTimer); this.closeRoundTimer = null; }
 
     // First to act pre-flop is UTG (after BB)
     const utgIndex = this.nextSeatAfter(bbIndex, activeSeatIndices);
@@ -315,6 +350,16 @@ export class PokerGameEngine {
       this.actedSinceLastBet.add(userId);
     }
 
+    // VPIP tracking — preflop CALL/RAISE/ALL_IN counts as voluntary money
+    // in the pot. CHECK (BB walking through unraised) and FOLD do not count.
+    // Posted blinds are auto-deducted, never go through processAction, so
+    // they're correctly excluded here. The set is read at hand-end by
+    // roomManager.persistHandResult to bump each user's vpipHands counter.
+    if (this.state.street === 'PREFLOP'
+        && (action === 'CALL' || action === 'RAISE' || action === 'ALL_IN')) {
+      this.voluntaryPreflopUserIds.add(userId);
+    }
+
     seat.lastActionAt = Date.now();
     this.state.lastAction = {
       playerId: userId,
@@ -324,9 +369,51 @@ export class PokerGameEngine {
       timestamp: Date.now(),
     };
 
+    // Decide whether this action will close the betting round (i.e. the
+    // upcoming advanceGame() will route through advanceStreet, which zeros
+    // every seat's betThisStreet). If so, freeze the active player BEFORE
+    // emitting so the broadcast accurately reflects "no one's turn" — and
+    // then schedule advanceGame() so the client gets a visible window to
+    // animate the closing player's bet badge onto the felt before the next
+    // emit clears every bet to feed the pot. See comment on
+    // `closeRoundTimer` above for the underlying SwiftUI batching reason.
+    const willCloseRound = this.willCloseBettingRound();
+    if (willCloseRound) {
+      this.state.activePlayerId = null;
+      this.state.actionDeadline = 0;
+    }
+
     this.emit();
-    this.advanceGame();
+
+    if (willCloseRound) {
+      if (this.closeRoundTimer) clearTimeout(this.closeRoundTimer);
+      this.closeRoundTimer = setTimeout(() => {
+        this.closeRoundTimer = null;
+        this.advanceGame();
+      }, CLOSE_ROUND_DELAY_MS);
+    } else {
+      this.advanceGame();
+    }
     return { ok: true };
+  }
+
+  // Mirrors advanceGame's branch logic to predict whether the upcoming
+  // advanceGame() call will collapse betThisStreet via advanceStreet — vs
+  // simply moving to the next player (no bets cleared) or calling endHand
+  // (which preserves betThisStreet through showdown). Used by processAction
+  // to decide whether to delay advanceGame so the client can render the
+  // closing action's chip arrival before bets vanish into the pot.
+  private willCloseBettingRound(): boolean {
+    const activePlayers = this.state.seats.filter(
+      s => s.status === 'ACTIVE' || s.status === 'ALL_IN'
+    );
+    // endHand path — single contestant remaining (everyone else folded).
+    // endHand doesn't zero betThisStreet, and is paced by HAND_START_DELAY,
+    // so no extra delay is needed here.
+    if (activePlayers.filter(s => s.status !== 'FOLDED').length === 1) {
+      return false;
+    }
+    return this.isBettingRoundComplete();
   }
 
   // ─── Legal Actions ──────────────────────────────────────────────────────────
@@ -390,24 +477,48 @@ export class PokerGameEngine {
     // We check the live (non-folded, non-sitting-out) seats: if at most one
     // of them still has chips, all live hole cards are exposed regardless of
     // `phase` so the iOS client can render them face-up on every street.
+    //
+    // CRITICAL: also require `activePlayerId === null`. Without this guard,
+    // an all-in bet on the river that puts the bettor's stack to 0 instantly
+    // satisfies "≤1 player with chips" while the *opponent* still has the
+    // action — and we'd send the bettor's hole cards to the opponent before
+    // they even decide whether to call or fold. activePlayerId is only
+    // cleared when the engine has finished routing action for the street
+    // (advanceStreet, endHand), so gating on null ensures we only reveal
+    // once the betting round is genuinely settled.
     const liveSeats = this.state.seats.filter(
       s => s.status === 'ACTIVE' || s.status === 'ALL_IN',
     );
     const liveSeatsWithChips = liveSeats.filter(s => s.stack > 0);
     const isAllInShowdown =
-      liveSeats.length >= 2 && liveSeatsWithChips.length <= 1;
+      liveSeats.length >= 2 &&
+      liveSeatsWithChips.length <= 1 &&
+      this.state.activePlayerId === null;
+
+    // ─── Showdown reveal window ────────────────────────────────────────────────
+    // `endHand` flips phase SHOWDOWN → ENDED synchronously before its single
+    // emit(), so clients never observe phase==='SHOWDOWN' for a contested
+    // hand. The reveal window is therefore phase==='ENDED' AND winners exist
+    // AND at least one winner was flagged showCards (set from the `showdown`
+    // param to endHand — true for river/all-in, false for fold-wins). This
+    // keeps fold-wins muck-by-default while letting real showdowns flip up.
+    const isContestedShowdown =
+      this.state.phase === 'SHOWDOWN' ||
+      (this.state.phase === 'ENDED'
+        && (this.state.winners?.some(w => w.showCards) ?? false));
 
     const seats: ClientSeat[] = this.state.seats.map(s => {
       // Hole-card visibility rules:
       //   1. The seat's own user always sees their own cards.
-      //   2. Other players see them ONLY at a real showdown (phase === 'SHOWDOWN').
-      //   3. Fold-wins do NOT reveal cards. When everyone-but-one folds, the engine
-      //      sets `winners` to end the hand but the phase is still PREFLOP/FLOP/etc.
-      //      Real poker rooms never auto-show the winner's hand in this case — the
-      //      winner can voluntarily show via the show_cards event, but mucking
-      //      face-down is the default.
-      //   4. All-in showdown (rule above) also reveals — same behaviour as a live
-      //      dealer turning cards up when no further betting is possible.
+      //   2. Other players see them at a real showdown — either phase
+      //      ==='SHOWDOWN' (transient, currently unobserved by clients) or
+      //      phase==='ENDED' with at least one winner.showCards flagged
+      //      (the actual reveal window — see `isContestedShowdown` above).
+      //   3. Fold-wins do NOT reveal cards. endHand(false) leaves
+      //      winner.showCards=false so the ENDED branch above stays closed.
+      //      The winner can voluntarily show via the show_cards event.
+      //   4. All-in showdown (rule above) also reveals — same behaviour as a
+      //      live dealer turning cards up when no further betting is possible.
       //   5. Folded players' holeCards are now stored in `mucked` (see
       //      `foldPlayer`); they no longer auto-reveal at SHOWDOWN, only via
       //      the voluntary `revealedCards` channel below.
@@ -417,14 +528,22 @@ export class PokerGameEngine {
       // this branch the owner would see their own cards vanish on fold and
       // wouldn't be able to tap-to-show. Other viewers never see mucked.
       const ownerCards = s.status === 'FOLDED' ? s.mucked : s.holeCards;
+      // Folded seats keep holeCards=null even during a contested-showdown
+      // reveal window. Their actual cards live in `mucked`; emitting an
+      // empty `s.holeCards: []` would also break the iOS `hasCards` check
+      // (which falls back to `cardCount` only when holeCards is nil), so
+      // the face-down cluster wouldn't render beside the folded avatar.
+      const isFolded = s.status === 'FOLDED';
       const holeCards =
         s.userId === forUserId
           ? ownerCards
-          : this.state.phase === 'SHOWDOWN'
-            ? s.holeCards
-            : isAllInShowdown
+          : isFolded
+            ? null
+            : isContestedShowdown
               ? s.holeCards
-              : null;
+              : isAllInShowdown
+                ? s.holeCards
+                : null;
 
       // ─── Voluntarily revealed cards (visible to everyone) ───────────────
       // The seat's owner has tapped specific card indices to expose. We look

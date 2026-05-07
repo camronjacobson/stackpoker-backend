@@ -87,6 +87,12 @@ class GameRoomManager {
       const winnerIds  = state.winners.map(w => w.playerId);
       const primaryWin = state.winners[0];
 
+      // Pull the per-hand VPIP set from the engine *before* the next hand's
+      // startHand() clears it. The Set→Set lookup below is O(1) per seat.
+      const voluntaryIds = new Set(
+        this.engines.get(tableId)?.getVoluntaryPreflopUserIds() ?? []
+      );
+
       // Create hand history record
       const hand = await prisma.handHistory.create({
         data: {
@@ -101,10 +107,20 @@ class GameRoomManager {
         },
       });
 
-      // Update player chip balances and stats
+      // Update player chip balances and stats. handsPlayed only increments
+      // for seats that were actually dealt in (status FOLDED/ACTIVE/ALL_IN
+      // at hand end) — SITTING_OUT seats are spectators this hand and
+      // shouldn't dilute VPIP%. WAITING shouldn't appear at hand end (it's
+      // pre-deal), but we exclude it defensively.
+      const dealtIn = (status: string) =>
+        status === 'ACTIVE' || status === 'ALL_IN' || status === 'FOLDED';
+
       await Promise.all(
-        state.seats.map(seat =>
-          prisma.$transaction([
+        state.seats.map(seat => {
+          const wasDealtIn = dealtIn(seat.status);
+          const isWinner   = winnerIds.includes(seat.userId);
+          const wasVoluntary = voluntaryIds.has(seat.userId);
+          return prisma.$transaction([
             prisma.tableSession.updateMany({
               where: { tableId, userId: seat.userId, isActive: true },
               data: { currentStack: BigInt(seat.stack) },
@@ -112,14 +128,15 @@ class GameRoomManager {
             prisma.user.update({
               where: { id: seat.userId },
               data: {
-                handsPlayed: { increment: 1 },
-                ...(winnerIds.includes(seat.userId) ? {
+                ...(wasDealtIn ? { handsPlayed: { increment: 1 } } : {}),
+                ...(wasDealtIn && wasVoluntary ? { vpipHands: { increment: 1 } } : {}),
+                ...(isWinner ? {
                   totalWon: { increment: BigInt(state.winners!.find(w => w.playerId === seat.userId)?.amount ?? 0) },
                 } : {}),
               },
             }),
-          ])
-        )
+          ]);
+        })
       );
 
       logger.info(`Hand #${state.handNumber} persisted for table ${tableId}`);
