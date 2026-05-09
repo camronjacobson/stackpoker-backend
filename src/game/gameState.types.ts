@@ -47,6 +47,12 @@ export interface Seat {
   isConnected:    boolean;
   isBot?:         boolean;         // true for AI-controlled players
   lastActionAt:   number;          // unix ms
+  // Set when the player taps "leave" mid-hand. The seat stays in the array
+  // until endHand so action ordering, dealer/blind tracking, and any all-in
+  // showdown rights stay intact for the remainder of the hand. The endHand
+  // cleanup filters these out before the next hand starts, freeing the seat
+  // for someone else to join. Optional for wire-protocol back-compat.
+  pendingLeave?:  boolean;
 }
 
 // ─── Last Action (broadcast-safe) ────────────────────────────────────────────
@@ -156,6 +162,10 @@ export interface ClientSeat {
   isBigBlind:     boolean;
   timeBank:       number;
   isConnected:    boolean;
+  // Mirrors `Seat.pendingLeave`. Lets the iOS client grey out the avatar
+  // and label them as "Left" while the hand finishes — the seat is still
+  // visually present until endHand removes it.
+  pendingLeave?:  boolean;
 }
 
 export interface LegalAction {

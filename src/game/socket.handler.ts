@@ -27,6 +27,13 @@ const prisma = new PrismaClient();
 // real `leaveTable` flow to return chips and free the lobby slot. Without
 // this, sessions accumulate forever and the lobby shows ghost players.
 const DISCONNECT_GRACE_MS = 90_000;
+// Explicit-leave grace — when the user taps "Leave Table" with chips still
+// in front of them, we treat it as a "soft leave": the DB session stays
+// active so they can press "Join Game" on the same table and slide back in
+// with their existing stack (no second buy-in). If they don't return within
+// this window, we run the real cash-out flow. Aligned with TABLE_IDLE_MS so
+// an abandoned table and an abandoned seat clean up together.
+const LEAVE_GRACE_MS = 90_000;
 const sessionCleanupTimers = new Map<string, NodeJS.Timeout>();
 const cleanupKey = (tableId: string, userId: string) => `${tableId}:${userId}`;
 
@@ -279,13 +286,16 @@ export function registerSocketHandlers(io: SocketServer): void {
     // updated `revealedCards` field at the affected seat. We do NOT echo
     // a separate event; the per-recipient broadcastGameState already
     // routes a fresh ClientGameState with the new reveal baked in.
-    socket.on('show_cards', (payload: { tableId: string; cardIndex: number }) => {
+    // `handNumber` is optional in the payload to preserve compatibility with
+    // older TestFlight builds that ship without it. Newer builds include it
+    // so the engine can drop a tap that landed during the next hand.
+    socket.on('show_cards', (payload: { tableId: string; cardIndex: number; handNumber?: number }) => {
       try {
-        const { tableId, cardIndex } = payload;
+        const { tableId, cardIndex, handNumber } = payload;
         const engine = roomManager.get(tableId);
         if (!engine) { emit(socket, 'error', { code: 'NO_GAME', message: 'No active game' }); return; }
-        const added = engine.showCard(userId, cardIndex);
-        if (!added) return; // bad index, no hand, or duplicate — silently ignore
+        const added = engine.showCard(userId, cardIndex, handNumber);
+        if (!added) return; // bad index, no hand, stale handNumber, or duplicate — silently ignore
         markTableActive(tableId);
         void broadcastGameState(io, tableId);
       } catch (err) {
@@ -297,25 +307,46 @@ export function registerSocketHandlers(io: SocketServer): void {
     socket.on('leave_table', async (payload: { tableId: string }) => {
       const { tableId } = payload;
       socket.leave(tableRoom(tableId));
+
+      // Read the seat's stack BEFORE removePlayer wipes it. This decides
+      // whether the leave is "soft" (chips remain, session stays active so
+      // the user can press Join Game and slide back in with the same stack)
+      // or "hard" (busted with 0 chips → close the seat now and return
+      // whatever is left to chipBalance via autoLeave).
       const engine = roomManager.get(tableId);
+      const seat   = engine?.getState().seats.find((s: any) => s.userId === userId);
+      const stack  = seat ? Number(seat.stack) : 0;
+
       if (engine) {
         engine.removePlayer(userId);
         socket.to(tableRoom(tableId)).emit('player_left', { event: 'player_left', data: { userId, username }, ts: Date.now() });
       }
       (socket as any).currentTableId = null;
 
-      // Cancel any pending grace-period cleanup — we're leaving explicitly
-      // now, no need to wait.
+      // Cancel any pending grace-period cleanup; we'll either schedule a new
+      // one (soft leave) or run autoLeave inline (hard leave / bust).
       const pending = sessionCleanupTimers.get(cleanupKey(tableId, userId));
       if (pending) {
         clearTimeout(pending);
         sessionCleanupTimers.delete(cleanupKey(tableId, userId));
       }
 
-      // Free the seat in the DB (mark session inactive, return chips, close
-      // the table if it just emptied). Without this, the lobby keeps
-      // counting the user as seated forever.
-      await autoLeave(userId, tableId);
+      if (stack > 0) {
+        // Soft leave: keep the DB session active so a subsequent join_table
+        // re-seats the user with `currentStack` (no second buy-in). Schedule
+        // a grace timer so abandoned seats still clean up — the iOS lobby
+        // and the TABLE_IDLE_MS sweep both align with this window.
+        const key = cleanupKey(tableId, userId);
+        const t = setTimeout(() => {
+          sessionCleanupTimers.delete(key);
+          void autoLeave(userId, tableId);
+        }, LEAVE_GRACE_MS);
+        sessionCleanupTimers.set(key, t);
+      } else {
+        // Hard leave (busted, or seat already gone): free the slot now so
+        // the lobby stops counting them as seated.
+        await autoLeave(userId, tableId);
+      }
     });
 
     socket.on('table_chat', (payload: { tableId: string; message: string }) => {

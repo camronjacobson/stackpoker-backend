@@ -36,6 +36,13 @@ const SHOWDOWN_DURATION = 5_000;    // ms to show cards before clearing
 // is long enough for the spring on the bet-chip layer (response 0.65) to
 // nearly settle while still feeling snappy at the table.
 const CLOSE_ROUND_DELAY_MS = 700;
+// Shorter close-round delay used when the closing action moved no chips
+// (i.e. a check-around — every seat's betThisStreet is 0 at the moment the
+// round closes). With nothing to animate onto the felt there's no reason to
+// hold the full 700ms; this just makes the next street's deal feel snappier
+// after a passive round. Still long enough that SwiftUI's transaction
+// boundary isn't collapsed onto the same socket flush.
+const CLOSE_ROUND_DELAY_NO_BETS_MS = 180;
 
 // ─── Game Engine ─────────────────────────────────────────────────────────────
 
@@ -144,13 +151,40 @@ export class PokerGameEngine {
   removePlayer(userId: string): void {
     const seat = this.state.seats.find(s => s.userId === userId);
     if (!seat) return;
-    if (this.state.phase !== 'WAITING' && this.state.phase !== 'ENDED') {
-      // Mid-hand: fold + mark sitting out
-      if (seat.status === 'ACTIVE') this.foldPlayer(userId);
-      seat.status = 'SITTING_OUT';
-    } else {
+
+    const betweenHands =
+      this.state.phase === 'WAITING' || this.state.phase === 'ENDED';
+
+    // Between-hand leave: free the seat immediately so others can sit.
+    // Same when the player isn't part of the current hand at all
+    // (SITTING_OUT) — there's nothing for them to leave behind.
+    if (betweenHands || seat.status === 'SITTING_OUT') {
       this.state.seats = this.state.seats.filter(s => s.userId !== userId);
+      this.emit();
+      return;
     }
+
+    // Mid-hand leave. Mark `pendingLeave` so the iOS client greys the
+    // avatar out + labels it "Left", and so endHand's cleanup pass knows
+    // to evict this seat once the hand finishes. Keeping the seat in the
+    // array (rather than splice-removing now) preserves seat indices,
+    // dealer/blind tracking, and any all-in showdown rights they have on
+    // the chips already in the pot.
+    seat.pendingLeave = true;
+
+    if (seat.status === 'ACTIVE') {
+      // Fold the leaving player so the betting round can proceed without
+      // them. If it was their turn we also have to advance — `foldPlayer`
+      // alone doesn't move action, it only mutates seat.status. Without
+      // moveToNextPlayer the table sits frozen on a folded actor.
+      const wasTheirTurn = this.state.activePlayerId === userId;
+      this.foldPlayer(userId);
+      if (wasTheirTurn) this.moveToNextPlayer();
+    }
+    // ALL_IN seats stay all-in — they're entitled to the showdown for the
+    // chips they already committed. They're still flagged pendingLeave so
+    // they get evicted at hand end.
+
     this.emit();
   }
 
@@ -172,10 +206,23 @@ export class PokerGameEngine {
   // index was newly added so the caller knows whether to broadcast — a
   // duplicate tap is a no-op rather than an error so an over-eager double
   // tap doesn't blow up the socket. Idempotent.
-  showCard(userId: string, cardIndex: number): boolean {
+  //
+  // `requestHandNumber` (optional) closes the race where a player taps
+  // reveal in the dying milliseconds of a hand: the tap travels the wire,
+  // and meanwhile the server has already run startHand for the next hand.
+  // Without a guard, the index gets pushed onto the *new* hand's seat and
+  // exposes the wrong card for the entire next hand. When the client sends
+  // its current handNumber along with the tap, we drop any tap that
+  // doesn't match the engine's current hand. Older clients omit the field
+  // and fall back to legacy behaviour so we don't break TestFlight builds
+  // shipped before this guard existed.
+  showCard(userId: string, cardIndex: number, requestHandNumber?: number): boolean {
     const seat = this.state.seats.find(s => s.userId === userId);
     if (!seat) return false;
     if (this.state.handNumber === 0) return false;
+    if (requestHandNumber !== undefined && requestHandNumber !== this.state.handNumber) {
+      return false;
+    }
     const sourceLength = seat.status === 'FOLDED'
       ? seat.mucked.length
       : seat.holeCards.length;
@@ -239,27 +286,38 @@ export class PokerGameEngine {
     // the previous hand's run-out reveal on the new hand's empty board.
     this.state.runOutBoard    = [];
 
-    // Reset per-hand seat state
+    // Reset per-hand seat state.
+    //
+    // CRITICAL — chip-duplication bug fix (2026-05-09):
+    // `betThisStreet` and `totalContributed` MUST be cleared for *every*
+    // seat, not just the active ones. The previous version of this loop
+    // only zeroed those fields inside the `stack > 0 && !SITTING_OUT`
+    // branch, which meant a player who busted out the previous hand
+    // (stack → 0, falls into the else branch) kept their stale
+    // `totalContributed` from the hand they just lost. `buildClientView`
+    // and `endHand` both compute pots via `buildPots(seats.map(...
+    // totalContributed)))` over *all* seats — so that stale value showed
+    // up as a phantom pot slice every subsequent hand, and `endHand`'s
+    // `distributePots` credited it to the new winner. Chips appeared out
+    // of nowhere round after round (user reported a leaked 4.6k pot
+    // sticking across hands).
+    //
+    // Zero pot-tracking fields unconditionally. Card/blind state still
+    // branches on whether the seat is actually playing this hand.
     for (const seat of this.state.seats) {
+      seat.betThisStreet    = 0;
+      seat.totalContributed = 0;
+      seat.mucked           = [];
+      seat.voluntaryShownCardIndices = [];
+
       if (seat.stack > 0 && seat.status !== 'SITTING_OUT') {
-        seat.status          = 'ACTIVE';
-        seat.holeCards       = [];
-        // Last-hand reveal state has to clear before fresh cards land — otherwise
-        // stale mucked cards from the previous hand would still flash to the
-        // table on the new deal.
-        seat.mucked          = [];
-        seat.voluntaryShownCardIndices = [];
-        seat.betThisStreet   = 0;
-        seat.totalContributed = 0;
-        seat.isDealer        = false;
-        seat.isSmallBlind    = false;
-        seat.isBigBlind      = false;
+        seat.status       = 'ACTIVE';
+        seat.holeCards    = [];
+        seat.isDealer     = false;
+        seat.isSmallBlind = false;
+        seat.isBigBlind   = false;
       } else {
         seat.status = 'SITTING_OUT';
-        // Even players sitting out should drop any prior reveal state so a
-        // re-buy / re-seat starts clean.
-        seat.mucked = [];
-        seat.voluntaryShownCardIndices = [];
       }
     }
 
@@ -386,11 +444,16 @@ export class PokerGameEngine {
     this.emit();
 
     if (willCloseRound) {
+      // If no seat has chips on the felt, the closing action was a check —
+      // nothing to animate, so use the shorter delay so the next street
+      // deals faster.
+      const hasVisibleBets = this.state.seats.some(s => s.betThisStreet > 0);
+      const delay = hasVisibleBets ? CLOSE_ROUND_DELAY_MS : CLOSE_ROUND_DELAY_NO_BETS_MS;
       if (this.closeRoundTimer) clearTimeout(this.closeRoundTimer);
       this.closeRoundTimer = setTimeout(() => {
         this.closeRoundTimer = null;
         this.advanceGame();
-      }, CLOSE_ROUND_DELAY_MS);
+      }, delay);
     } else {
       this.advanceGame();
     }
@@ -580,6 +643,11 @@ export class PokerGameEngine {
         isBigBlind:       s.isBigBlind,
         timeBank:         s.timeBank,
         isConnected:      s.isConnected,
+        // Mid-hand leave indicator. iOS uses this to grey out the avatar
+        // and overlay a "Left" badge so the rest of the table sees the
+        // player has bailed even though their seat is still occupied
+        // until endHand removes it.
+        pendingLeave:     s.pendingLeave === true ? true : undefined,
       };
     });
 
@@ -739,8 +807,41 @@ export class PokerGameEngine {
     const activePlayers = this.state.seats.filter(s => s.status === 'ACTIVE' || s.status === 'ALL_IN');
     const bettingPlayers = this.state.seats.filter(s => s.status === 'ACTIVE');
 
-    // If only one player left (everyone else folded) → end hand immediately
+    // If only one player left (everyone else folded) → end hand.
+    //
+    // We can't `endHand` synchronously when there are still visible bets in
+    // front of seats (e.g. someone called a bet then the next-to-act folded,
+    // leaving SB/BB or call chips parked in front of the remaining seats).
+    // `endHand` builds pots from `totalContributed` and broadcasts the
+    // winner+pot animation, but it does NOT zero `betThisStreet` — those
+    // values stay until `startHand` clears them at the next deal. The iOS
+    // client therefore sees: bet badges sit through the winner banner, then
+    // disappear with no transition target when the next hand emits with
+    // bets=0 (the pot has already moved to the winner). Visually: chips in
+    // front of seats vanish instead of flying to the pot.
+    //
+    // Fix: emit a bet-zeroing state first so the client gets to play its
+    // existing bet-removal transition (chips → pot), wait `CLOSE_ROUND_DELAY_MS`
+    // for that animation to land, then run `endHand` for the winner reveal.
+    // Mirrors the close-round delay used in `processAction` for street
+    // advances. Pot value is unaffected (built from `totalContributed`).
+    // Showdown / all-in paths are unaffected because `advanceStreet` already
+    // zeros bets before reaching this branch on the river.
     if (activePlayers.filter(s => s.status !== 'FOLDED').length === 1) {
+      const hasVisibleBets = this.state.seats.some(s => s.betThisStreet > 0);
+      if (hasVisibleBets) {
+        for (const s of this.state.seats) s.betThisStreet = 0;
+        this.state.currentBet = 0;
+        this.state.activePlayerId = null;
+        this.state.actionDeadline = 0;
+        this.emit();
+        if (this.closeRoundTimer) clearTimeout(this.closeRoundTimer);
+        this.closeRoundTimer = setTimeout(() => {
+          this.closeRoundTimer = null;
+          this.endHand(false);
+        }, CLOSE_ROUND_DELAY_MS);
+        return;
+      }
       this.endHand(false);
       return;
     }
@@ -1260,10 +1361,33 @@ export class PokerGameEngine {
 
     // Remove busted players (stack = 0) and schedule next hand
     setTimeout(() => {
+      // Evict players who tapped "leave" mid-hand. We hold their seat
+      // until now so action ordering, dealer/blind tracking, and any
+      // all-in showdown rights stay intact. With the hand over, they
+      // can be safely spliced out — their seat re-opens for someone
+      // else to join, and `nextSeatAfter` (used by startHand to advance
+      // the dealer button + blinds) automatically routes around the
+      // missing seatIndex because it walks the remaining activeSeats
+      // sorted by index. No need to renormalize seatIndex values.
+      this.state.seats = this.state.seats.filter(s => !s.pendingLeave);
+
       for (const seat of this.state.seats) {
         if (seat.stack === 0) seat.status = 'SITTING_OUT';
         else seat.status = 'WAITING';
+        // Belt-and-suspenders pot reset: the authoritative reset happens
+        // in startHand, but startHand doesn't fire until canStartHand()
+        // is true — which can be never (one player at the table, table
+        // closing, etc.). Clearing here means the WAITING-phase emit
+        // below broadcasts a clean 0 pot instead of carrying the
+        // previous hand's totalContributed forward into the next
+        // buildClientView fallback at gameEngine.ts:658-659.
+        seat.betThisStreet    = 0;
+        seat.totalContributed = 0;
       }
+      // Drop the snapshot of the prior hand's pot slices; without this
+      // `buildClientView`'s `state.pots.length > 0 ? state.pots : pots`
+      // ternary keeps emitting the dead pot until startHand wipes it.
+      this.state.pots    = [];
       this.state.phase   = 'WAITING';
       this.state.winners = null;
       this.emit();
