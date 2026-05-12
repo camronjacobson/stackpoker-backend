@@ -122,16 +122,43 @@ lobbyRouter.post('/:id/topup',
   async (req: Request, res: Response) => {
     if (!handleValidation(req, res)) return;
     try {
+      const tableId = req.params.id;
+      const userId  = req.user!.sub;
+      const amount  = parseInt(req.body.amount, 10);
+
+      // Decide the path based on the live engine state. A hand is "in
+      // progress" for any phase that isn't WAITING (between hands) or
+      // ENDED (showdown reveal window — actually, ENDED is brief and
+      // followed by the setTimeout that drains queued top-ups, so we
+      // also count it as in-progress to avoid a race where the user
+      // hits the endpoint in that window and accidentally takes the
+      // apply path that updates DB while the engine is about to flip
+      // WAITING and drain pending). If the engine doesn't exist yet
+      // (no one is connected, or this is the very first sit), apply
+      // immediately — there's no hand to interfere with.
+      const engine = roomManager.get(tableId);
+      const phase  = engine?.getState().phase;
+      const handActive =
+        phase === 'STARTING' || phase === 'DEALING' ||
+        phase === 'BETTING'  || phase === 'SHOWDOWN' ||
+        phase === 'ENDED';
+
       const result = await lobbyService.topUpChips(
-        req.user!.sub,
-        req.params.id,
-        parseInt(req.body.amount, 10)
+        userId,
+        tableId,
+        amount,
+        handActive ? 'queue' : 'apply',
       );
 
-      // Push the new stack into the live engine so the broadcast reflects
+      // Mirror the DB write into the live engine so the broadcast reflects
       // the rebuy without waiting for the next hand to reload from DB.
-      const engine = roomManager.get(req.params.id);
-      if (engine) engine.setStack(req.user!.sub, parseInt(result.newStack, 10));
+      //   • apply: setStack to the new (projected) total
+      //   • queue: park the amount on the seat as pendingTopUp; the engine
+      //     drains it into `stack` at endHand and roomManager persists.
+      if (engine) {
+        if (handActive) engine.queueTopUp(userId, amount);
+        else            engine.setStack(userId, parseInt(result.newStack, 10));
+      }
 
       sendSuccess(res, result);
     } catch (err: any) {

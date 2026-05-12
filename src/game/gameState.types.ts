@@ -53,6 +53,17 @@ export interface Seat {
   // cleanup filters these out before the next hand starts, freeing the seat
   // for someone else to join. Optional for wire-protocol back-compat.
   pendingLeave?:  boolean;
+  // Chips the user has paid for mid-hand but that won't credit their stack
+  // until the current hand finishes — see `queueTopUp` / `applyPendingTopUps`
+  // on PokerGameEngine. We hold the chips here (rather than mutating
+  // `stack`) so the in-progress hand's pot math, all-in detection, and
+  // showdown rights stay derived from the stack the player had when the
+  // hand started. Cleared into `stack` by `applyPendingTopUps` at the end
+  // of every hand. Always non-negative. Optional so callers constructing
+  // the trimmed `Omit<Seat, ...>` payload for `addPlayer` / engine
+  // hydration don't have to pass it — the engine initializers default it
+  // to 0. Treat missing as 0.
+  pendingTopUp?:  number;
 }
 
 // ─── Last Action (broadcast-safe) ────────────────────────────────────────────
@@ -166,6 +177,11 @@ export interface ClientSeat {
   // and label them as "Left" while the hand finishes — the seat is still
   // visually present until endHand removes it.
   pendingLeave?:  boolean;
+  // Mirrors `Seat.pendingTopUp`. iOS renders a small "+N pending" badge on
+  // the seat so the player and the table both see chips have been bought
+  // but won't credit until the hand ends. 0 (or omitted) → render nothing.
+  // Always non-negative.
+  pendingTopUp?:  number;
 }
 
 export interface LegalAction {

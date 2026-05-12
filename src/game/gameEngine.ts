@@ -104,6 +104,7 @@ export class PokerGameEngine {
         isSmallBlind:     false,
         isBigBlind:       false,
         lastActionAt:     Date.now(),
+        pendingTopUp:     0,
       })),
       deck:             [],
       communityCards:   [],
@@ -144,6 +145,7 @@ export class PokerGameEngine {
       betThisStreet: 0, totalContributed: 0,
       isDealer: false, isSmallBlind: false, isBigBlind: false,
       lastActionAt: Date.now(),
+      pendingTopUp: 0,
     });
     this.emit();
   }
@@ -197,6 +199,49 @@ export class PokerGameEngine {
     if (!seat) return;
     seat.stack = stack;
     this.emit();
+  }
+
+  // Top-up requested mid-hand. The chips have already been deducted from the
+  // user's bankroll by the time we get here (see lobby.service.topUpChips),
+  // so this method only has to park the amount on the seat. `stack` stays
+  // untouched until `applyPendingTopUps` drains the queue at end-of-hand —
+  // this is the whole point of the mid-hand top-up flow: the user can
+  // commit to buying more chips without their current hand's pot math,
+  // all-in detection, or showdown rights getting distorted by the larger
+  // stack. Returns true if the queue mutation happened (seat exists),
+  // false otherwise (so the route layer can refund the user's bankroll).
+  // Public so lobbyService can call it; emits a state push so the iOS
+  // client can render the "+N pending" badge on the seat immediately.
+  queueTopUp(userId: string, amount: number): boolean {
+    if (!Number.isFinite(amount) || amount <= 0) return false;
+    const seat = this.state.seats.find(s => s.userId === userId);
+    if (!seat) return false;
+    seat.pendingTopUp = (seat.pendingTopUp || 0) + amount;
+    this.emit();
+    return true;
+  }
+
+  // Drain any queued mid-hand top-ups into seat stacks. Called from
+  // `endHand`'s setTimeout *after* winners are cleared and the seat status
+  // pass runs — so a player who was SITTING_OUT with stack=0 because they
+  // busted and queued a rebuy mid-hand correctly transitions back to
+  // WAITING with their new stack. Idempotent: re-running with no pending
+  // amounts is a no-op. Returns the per-user amounts that were applied so
+  // the route layer (or roomManager.persistHandResult) can sync the DB.
+  applyPendingTopUps(): { userId: string; amount: number; newStack: number }[] {
+    const applied: { userId: string; amount: number; newStack: number }[] = [];
+    for (const seat of this.state.seats) {
+      const pending = seat.pendingTopUp || 0;
+      if (pending <= 0) continue;
+      seat.stack += pending;
+      seat.pendingTopUp = 0;
+      // A player who busted and queued a rebuy is now playable again.
+      if (seat.status === 'SITTING_OUT' && seat.stack > 0) {
+        seat.status = 'WAITING';
+      }
+      applied.push({ userId: seat.userId, amount: pending, newStack: seat.stack });
+    }
+    return applied;
   }
 
   // Player tapped one of their own hole cards to expose it to the table.
@@ -648,6 +693,12 @@ export class PokerGameEngine {
         // player has bailed even though their seat is still occupied
         // until endHand removes it.
         pendingLeave:     s.pendingLeave === true ? true : undefined,
+        // Mid-hand top-up indicator. Omit when 0 to keep the wire payload
+        // small (and to match the optional shape on the iOS Decodable
+        // side, where `nil` is fine but `0` would still need handling).
+        pendingTopUp:     s.pendingTopUp && s.pendingTopUp > 0
+                            ? s.pendingTopUp
+                            : undefined,
       };
     });
 
@@ -1370,6 +1421,12 @@ export class PokerGameEngine {
       // missing seatIndex because it walks the remaining activeSeats
       // sorted by index. No need to renormalize seatIndex values.
       this.state.seats = this.state.seats.filter(s => !s.pendingLeave);
+
+      // Drain any mid-hand top-ups first so the bust-vs-WAITING decision
+      // below uses the post-top-up stack. Without this, a player who
+      // bought chips during the hand they just busted would be flagged
+      // SITTING_OUT for the next hand and have to manually wake up.
+      this.applyPendingTopUps();
 
       for (const seat of this.state.seats) {
         if (seat.stack === 0) seat.status = 'SITTING_OUT';

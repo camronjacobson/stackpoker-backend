@@ -334,16 +334,34 @@ export async function leaveTable(userId: string, tableId: string): Promise<{ chi
 }
 
 // ─── Top Up Chips (mid-table rebuy) ───────────────────────────────────────────
-// Lets a seated player add chips to their stack between hands. Blocked
-// while a hand is in progress (you can't rebuy mid-action without
-// distorting the game state). Total stack after top-up cannot exceed
-// the table's maxBuyIn so cash-game rules hold.
+// Lets a seated player add chips to their stack. Two execution paths share
+// the same validation here:
+//
+//   • `mode === 'apply'` (between hands): the chips credit the seat's
+//     `currentStack` immediately, and the route layer calls `engine.setStack`
+//     so the live broadcast picks up the new value. Original flow.
+//
+//   • `mode === 'queue'` (mid-hand): the chips are debited from the user's
+//     bankroll *now* (locks the funds, prevents over-spending) but the
+//     seat's `currentStack` in the DB stays untouched. The route layer
+//     calls `engine.queueTopUp`, which parks the amount on the seat as
+//     `pendingTopUp` and emits a state push so iOS can render a small
+//     "+N pending" badge. The engine drains the queue into `seat.stack`
+//     at the end of the current hand (see `applyPendingTopUps`), and the
+//     next persist pass (roomManager.persistHandResult) syncs the DB
+//     stack back from the engine.
+//
+// The mode-selection lives in the route — it has the engine handle and
+// can read its phase. Service stays DB-only.
+
+export type TopUpMode = 'apply' | 'queue';
 
 export async function topUpChips(
   userId: string,
   tableId: string,
-  amount: number
-): Promise<{ newStack: string; addedAmount: string }> {
+  amount: number,
+  mode: TopUpMode = 'apply'
+): Promise<{ newStack: string; addedAmount: string; pending: boolean }> {
   if (!Number.isInteger(amount) || amount <= 0) {
     throw { code: 'INVALID_AMOUNT', message: 'Top-up amount must be a positive integer' };
   }
@@ -360,12 +378,14 @@ export async function topUpChips(
   if (table.status === 'CLOSED') {
     throw { code: 'TABLE_CLOSED', message: 'This table is closed' };
   }
-  if (table.status === 'IN_PROGRESS') {
-    throw { code: 'GAME_IN_PROGRESS', message: 'Cannot add chips during a hand. Try again after the hand ends.' };
-  }
 
-  const newStack = session.currentStack + BigInt(amount);
-  if (newStack > table.maxBuyIn) {
+  // Max-buyin check uses the *projected* total — current stack plus the
+  // amount being added. The queue path doesn't write the new stack to DB,
+  // but the cap still has to hold to keep cash-game rules honest (a player
+  // shouldn't be able to "queue" their way past maxBuyIn even if the hand
+  // hasn't applied it yet).
+  const projectedStack = session.currentStack + BigInt(amount);
+  if (projectedStack > table.maxBuyIn) {
     throw {
       code: 'EXCEEDS_MAX_BUYIN',
       message: `Stack cannot exceed table max buy-in of ${table.maxBuyIn}`,
@@ -378,14 +398,12 @@ export async function topUpChips(
     throw { code: 'INSUFFICIENT_CHIPS', message: 'Not enough chips for this top-up' };
   }
 
-  await prisma.$transaction([
+  // Common DB writes: debit user, record transaction. The session stack
+  // update is the discriminator — only the 'apply' path writes it now.
+  const writes: any[] = [
     prisma.user.update({
       where: { id: userId },
       data: { chipBalance: { decrement: BigInt(amount) } },
-    }),
-    prisma.tableSession.update({
-      where: { id: session.id },
-      data: { currentStack: newStack },
     }),
     prisma.chipTransaction.create({
       data: {
@@ -393,15 +411,31 @@ export async function topUpChips(
         amount:      BigInt(-amount),
         type:        'BUY_IN',
         tableId,
-        description: `Top-up at table "${table.name}"`,
+        description: mode === 'queue'
+          ? `Pending top-up at table "${table.name}" (applies at hand end)`
+          : `Top-up at table "${table.name}"`,
       },
     }),
-  ]);
+  ];
+  if (mode === 'apply') {
+    writes.splice(1, 0, prisma.tableSession.update({
+      where: { id: session.id },
+      data: { currentStack: projectedStack },
+    }));
+  }
+  await prisma.$transaction(writes);
 
-  logger.info(`User ${userId} topped up ${amount} chips at table ${tableId} (new stack ${newStack})`);
+  logger.info(
+    `User ${userId} ${mode === 'queue' ? 'queued mid-hand' : 'topped up'} ${amount} chips ` +
+    `at table ${tableId} (projected stack ${projectedStack})`,
+  );
+
   return {
-    newStack:    newStack.toString(),
+    // For 'queue', newStack is the projected post-apply value so the iOS
+    // client can show a clean "after" preview even before the hand ends.
+    newStack:    projectedStack.toString(),
     addedAmount: String(amount),
+    pending:     mode === 'queue',
   };
 }
 
