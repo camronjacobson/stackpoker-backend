@@ -22,7 +22,8 @@ import { logger } from '../shared/utils';
 
 // ─── Config ───────────────────────────────────────────────────────────────────
 
-const TURN_DURATION_MS  = 30_000;   // 30 seconds per turn
+const TURN_DURATION_MS  = 15_000;   // 15 seconds per turn (was 30; iOS now grants +15s on demand)
+const TIME_EXTENSION_MS = 15_000;   // bonus seconds granted by request_time_extension
 const TIMEBANK_SECONDS  = 30;       // extra time bank
 const MIN_PLAYERS       = 2;
 const HAND_START_DELAY  = 6_000;    // ms after hand ends before new deal — gives the showdown reveal animation room to play
@@ -49,6 +50,10 @@ const CLOSE_ROUND_DELAY_NO_BETS_MS = 180;
 export class PokerGameEngine {
   private state: ServerGameState;
   private turnTimer: NodeJS.Timeout | null = null;
+  // userIds who have already burned their one-per-turn +15s extension on the
+  // current activePlayer. Cleared every time setActivePlayer advances the
+  // action so each new turn gets a fresh extension allowance.
+  private extensionUsedThisTurn: Set<string> = new Set();
   private disconnectTimers: Map<string, NodeJS.Timeout> = new Map();
   private lastAggressorId: string | null = null;
   // Players who have acted since the last bet/raise on the current street.
@@ -1069,6 +1074,9 @@ export class PokerGameEngine {
     if (!seat) { this.endHand(true); return; }
     this.state.activePlayerId  = seat.userId;
     this.state.actionDeadline  = Date.now() + TURN_DURATION_MS + seat.timeBank * 1000;
+    // New turn → new extension allowance for everybody. The set is keyed by
+    // userId so it survives seat reshuffles within a hand.
+    this.extensionUsedThisTurn.clear();
     this.startTurnTimer(seat);
 
     // Auto-act for bot players after a short "thinking" delay
@@ -1319,6 +1327,31 @@ export class PokerGameEngine {
 
   private clearTurnTimer(): void {
     if (this.turnTimer) { clearTimeout(this.turnTimer); this.turnTimer = null; }
+  }
+
+  // ─── Time Extension (one per turn per player) ───────────────────────────────
+  //
+  // Public: socket handler calls this when a player taps the +15s pill.
+  // Returns true iff the deadline was actually bumped (caller can choose to
+  // emit state on success). Gated on:
+  //   1. it's actually this user's turn (no one can extend during a hand
+  //      they're not active in),
+  //   2. they haven't already extended on this turn,
+  //   3. the hand is in a betting phase with a live deadline.
+  // The 1-per-turn cap exists so a stalling opponent can't repeatedly buy
+  // themselves another 15 seconds.
+  requestTimeExtension(userId: string): boolean {
+    if (this.state.activePlayerId !== userId) return false;
+    if (this.extensionUsedThisTurn.has(userId)) return false;
+    if (!this.state.actionDeadline) return false;
+    const seat = this.state.seats.find(s => s.userId === userId);
+    if (!seat) return false;
+
+    this.state.actionDeadline += TIME_EXTENSION_MS;
+    this.extensionUsedThisTurn.add(userId);
+    // Restart the auto-fold timer against the new (later) deadline.
+    this.startTurnTimer(seat);
+    return true;
   }
 
   // ─── End Hand ────────────────────────────────────────────────────────────────

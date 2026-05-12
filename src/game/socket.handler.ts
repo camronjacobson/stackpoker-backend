@@ -265,7 +265,9 @@ export function registerSocketHandlers(io: SocketServer): void {
             avatarId:    session.user.avatarId,
             stack:       Number(session.currentStack),
             status:      'WAITING' as const,
-            timeBank:    30,
+            // 15s fixed-per-turn budget, no persistent time bank. Players
+            // get a single +15s extension via request_time_extension.
+            timeBank:    0,
             isConnected: false,
             isBot:       session.user.username === 'StackBot',
           });
@@ -309,6 +311,25 @@ export function registerSocketHandlers(io: SocketServer): void {
       } catch (err) {
         logger.error('player_action error:', err);
         emit(socket, 'error', { code: 'SERVER_ERROR', message: 'Action failed' });
+      }
+    });
+
+    // Player tapped the +15s pill to extend their decision time. The engine
+    // enforces: must be your turn, one extension max per turn. Silent no-op
+    // on rejection — iOS already locally hides the button after tapping, so
+    // bouncing an error toast for a stale/spammed tap would be noise.
+    socket.on('request_time_extension', (payload: { tableId: string }) => {
+      try {
+        const { tableId } = payload;
+        const engine = roomManager.get(tableId);
+        if (!engine) return;
+        const ok = engine.requestTimeExtension(userId);
+        if (!ok) return;
+        markTableActive(tableId);
+        // Re-broadcast so every seat sees the new actionDeadline tick up.
+        void broadcastGameState(io, tableId);
+      } catch (err) {
+        logger.error('request_time_extension error:', err);
       }
     });
 

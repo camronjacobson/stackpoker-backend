@@ -72,7 +72,8 @@ export async function addBotToTable(tableId: string): Promise<void> {
     avatarId:    BOT_AVATAR_ID,
     stack:       buyIn,
     status:      'WAITING' as const,
-    timeBank:    30,
+    // Bots act instantly anyway — no need for a time bank.
+    timeBank:    0,
     isConnected: true,
     isBot:       true,
   });

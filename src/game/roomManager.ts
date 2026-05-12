@@ -41,7 +41,11 @@ class GameRoomManager {
       avatarId:    s.user.avatarId,
       stack:       Number(s.currentStack),
       status:      'WAITING' as const,
-      timeBank:    30,
+      // No persistent time bank — players get a fixed 15s per turn and can
+      // tap "+15s" once per turn to extend (see TIME_EXTENSION_MS in
+      // gameEngine.ts). Keeping this at 0 means actionDeadline math
+      // collapses to just TURN_DURATION_MS.
+      timeBank:    0,
       isConnected: false,
       // Tag bot seats so the engine auto-acts on their turn. Without this,
       // after a server restart the bot seat loses its isBot flag and only
