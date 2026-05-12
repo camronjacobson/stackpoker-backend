@@ -144,6 +144,25 @@ async function sweepIdleTables(io: SocketServer): Promise<void> {
         continue;
       }
 
+      // No live sockets. Before declaring idle, check if any human (non-bot)
+      // session is still active in the DB — that covers the soft-leave grace
+      // window where the user has left the WebSocket but their seat is still
+      // reserved for a rejoin. Without this, the 15s sweep races the rejoin
+      // and forceClose nukes the table (along with the bot) ~90s after the
+      // human leaves, even though they intended to come back. The DB count
+      // is cheap and only runs in the "no sockets" branch.
+      const humanActive = await prisma.tableSession.count({
+        where: {
+          tableId:  t.id,
+          isActive: true,
+          user: { username: { not: 'StackBot' } },
+        },
+      });
+      if (humanActive > 0) {
+        lastHumanActivityAt.set(t.id, now);
+        continue;
+      }
+
       // No humans connected. If we've never seen this table active, treat
       // first sighting as "now" so it still gets a 90s grace before close.
       const last = lastHumanActivityAt.get(t.id);
@@ -250,6 +269,19 @@ export function registerSocketHandlers(io: SocketServer): void {
             isConnected: false,
             isBot:       session.user.username === 'StackBot',
           });
+        } else {
+          // Seat still exists — typically means we left mid-hand and the
+          // engine kept the seat with `pendingLeave=true` so the current
+          // hand could finish payouts. Without clearing this flag here,
+          // the end-of-hand cleanup filter (gameEngine.ts:1423) evicts
+          // the returning user as soon as the current hand wraps,
+          // leaving them with a greyed-out "Left" badge that then
+          // disappears entirely. Clearing `pendingLeave` on rejoin
+          // cancels the eviction; the user is still FOLDED for the
+          // in-progress hand (correct — they really did fold when they
+          // tapped leave) but startHand will reset them to ACTIVE for
+          // the next deal.
+          hasSeat.pendingLeave = undefined;
         }
 
         engine.setConnected(userId, true);
