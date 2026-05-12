@@ -1319,9 +1319,16 @@ export class PokerGameEngine {
     const deadline = this.state.actionDeadline;
     const delay    = deadline - Date.now();
     this.turnTimer = setTimeout(() => {
-      // Auto-fold on timeout
-      logger.info(`Auto-fold: ${seat.username} timed out in hand #${this.state.handNumber}`);
-      this.processAction(seat.userId, 'FOLD');
+      // On timeout we prefer auto-CHECK over auto-FOLD when checking is
+      // legal (i.e. nothing to call — BB walking through an unraised pot,
+      // or any spot where seat has already matched currentBet). Folding
+      // a free check would burn the player's equity for no reason. Only
+      // bail out (fold) when there's an outstanding bet they'd have to
+      // pay to stay in.
+      const canCheck = seat.betThisStreet >= this.state.currentBet;
+      const action: 'CHECK' | 'FOLD' = canCheck ? 'CHECK' : 'FOLD';
+      logger.info(`Auto-${action.toLowerCase()}: ${seat.username} timed out in hand #${this.state.handNumber}`);
+      this.processAction(seat.userId, action);
     }, Math.max(delay, 0));
   }
 
