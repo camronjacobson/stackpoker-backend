@@ -123,6 +123,12 @@ model TableSession {
   isActive    Boolean   @default(true)
   joinedAt    DateTime  @default(now())
   leftAt      DateTime?
+  // Set when the user's socket drops or they tap "Leave Table" with chips
+  // still in front of them. Null while the user is actively connected.
+  // The socket sweeper looks for rows with `disconnectedAt < now - grace`
+  // and runs autoLeave on them, so cleanup survives process restarts that
+  // would have wiped an in-memory timer Map.
+  disconnectedAt DateTime?
 
   table PokerTable @relation(fields: [tableId], references: [id], onDelete: Cascade)
   user  User       @relation(fields: [userId], references: [id])

@@ -26,6 +26,13 @@ const prisma = new PrismaClient();
 // foreground/background, etc). If the user doesn't come back, we run the
 // real `leaveTable` flow to return chips and free the lobby slot. Without
 // this, sessions accumulate forever and the lobby shows ghost players.
+//
+// Cleanup is DB-driven (TableSession.disconnectedAt) rather than via an
+// in-memory setTimeout map. Reason: in-memory timers vanish on process
+// restart (Railway redeploy, crash), leaving permanent ghost sessions that
+// the idle-table sweeper can't touch because it only closes whole tables
+// with zero active sessions. The DB column lets the sweeper recover after
+// any restart by checking `disconnectedAt < now - grace` on boot.
 const DISCONNECT_GRACE_MS = 90_000;
 // Explicit-leave grace — when the user taps "Leave Table" with chips still
 // in front of them, we treat it as a "soft leave": the DB session stays
@@ -34,8 +41,33 @@ const DISCONNECT_GRACE_MS = 90_000;
 // this window, we run the real cash-out flow. Aligned with TABLE_IDLE_MS so
 // an abandoned table and an abandoned seat clean up together.
 const LEAVE_GRACE_MS = 90_000;
-const sessionCleanupTimers = new Map<string, NodeJS.Timeout>();
-const cleanupKey = (tableId: string, userId: string) => `${tableId}:${userId}`;
+
+// Stamp the session as "waiting for reconnect". Idempotent — re-stamping on
+// a still-disconnected session just refreshes the timer (matches the old
+// `clearTimeout + setTimeout` semantics).
+async function markSessionDisconnected(userId: string, tableId: string) {
+  try {
+    await prisma.tableSession.updateMany({
+      where: { tableId, userId, isActive: true },
+      data:  { disconnectedAt: new Date() },
+    });
+  } catch (err) {
+    logger.error('markSessionDisconnected failed:', err);
+  }
+}
+
+// Reverse of the above — call on rejoin so the sweeper stops considering
+// this session a cleanup candidate.
+async function clearSessionDisconnected(userId: string, tableId: string) {
+  try {
+    await prisma.tableSession.updateMany({
+      where: { tableId, userId, isActive: true },
+      data:  { disconnectedAt: null },
+    });
+  } catch (err) {
+    logger.error('clearSessionDisconnected failed:', err);
+  }
+}
 
 async function autoLeave(userId: string, tableId: string) {
   try {
@@ -104,15 +136,11 @@ async function forceCloseIdleTable(io: SocketServer, tableId: string): Promise<v
   }
   await prisma.$transaction(ops);
 
-  // Drop the in-memory engine and any pending grace timers for this table.
+  // Drop the in-memory engine for this table. Any DB-side disconnect
+  // stamps will become moot since the transaction above already flipped
+  // every session to isActive=false (the sweeper filters by isActive).
   roomManager.destroy(tableId);
   lastHumanActivityAt.delete(tableId);
-  for (const [key, timer] of Array.from(sessionCleanupTimers.entries())) {
-    if (key.startsWith(`${tableId}:`)) {
-      clearTimeout(timer);
-      sessionCleanupTimers.delete(key);
-    }
-  }
 
   // Notify any sockets still in the room (shouldn't be any, but be safe).
   io.to(tableRoom(tableId)).emit('table_closed', {
@@ -120,6 +148,31 @@ async function forceCloseIdleTable(io: SocketServer, tableId: string): Promise<v
     data: { tableId, reason: 'idle' },
     ts: Date.now(),
   });
+}
+
+// Find sessions stamped with `disconnectedAt` older than the grace window
+// and run autoLeave on them. This is the survives-restart replacement for
+// the old in-memory setTimeout map. Runs alongside sweepIdleTables on the
+// same interval — cheap query, indexed on isActive.
+async function sweepDisconnectedSessions(): Promise<void> {
+  // Use the larger of the two grace windows so a soft-leave (LEAVE_GRACE_MS)
+  // never gets cut short. Both are 90s today but keep the max() so future
+  // tuning of either constant stays safe.
+  const graceMs = Math.max(DISCONNECT_GRACE_MS, LEAVE_GRACE_MS);
+  const cutoff  = new Date(Date.now() - graceMs);
+
+  const stale = await prisma.tableSession.findMany({
+    where: {
+      isActive: true,
+      disconnectedAt: { not: null, lt: cutoff },
+    },
+    select: { userId: true, tableId: true },
+  });
+
+  for (const s of stale) {
+    logger.info(`Disconnect sweep: auto-leaving ${s.userId} from ${s.tableId}`);
+    await autoLeave(s.userId, s.tableId);
+  }
 }
 
 async function sweepIdleTables(io: SocketServer): Promise<void> {
@@ -215,6 +268,10 @@ export function registerSocketHandlers(io: SocketServer): void {
   // Periodic sweep that closes any WAITING table with no connected human
   // for TABLE_IDLE_MS. Runs forever for the lifetime of the process.
   setInterval(() => { void sweepIdleTables(io); }, SWEEP_INTERVAL_MS);
+  // Run the disconnected-session sweeper on the same cadence. Order doesn't
+  // matter — sessions that get auto-left here will be reflected in the
+  // table sweep on the next tick.
+  setInterval(() => { void sweepDisconnectedSessions(); }, SWEEP_INTERVAL_MS);
 
   roomManager.setBroadcastFn((tableId, _state) => broadcastGameState(io, tableId));
   roomManager.setHandEndFn((tableId, state) => {
@@ -235,13 +292,11 @@ export function registerSocketHandlers(io: SocketServer): void {
       try {
         const { tableId } = payload;
 
-        // Reconnecting before the grace period elapsed — cancel pending
-        // auto-leave so the user keeps their seat and chips.
-        const pending = sessionCleanupTimers.get(cleanupKey(tableId, userId));
-        if (pending) {
-          clearTimeout(pending);
-          sessionCleanupTimers.delete(cleanupKey(tableId, userId));
-        }
+        // Reconnecting before the grace period elapsed — clear the
+        // disconnect stamp so the sweeper stops considering this session a
+        // cleanup candidate. Safe to fire-and-await even if the column was
+        // already null (updateMany is a no-op in that case).
+        await clearSessionDisconnected(userId, tableId);
 
         const session = await prisma.tableSession.findUnique({
           where: { tableId_userId: { tableId, userId } },
@@ -376,25 +431,12 @@ export function registerSocketHandlers(io: SocketServer): void {
       }
       (socket as any).currentTableId = null;
 
-      // Cancel any pending grace-period cleanup; we'll either schedule a new
-      // one (soft leave) or run autoLeave inline (hard leave / bust).
-      const pending = sessionCleanupTimers.get(cleanupKey(tableId, userId));
-      if (pending) {
-        clearTimeout(pending);
-        sessionCleanupTimers.delete(cleanupKey(tableId, userId));
-      }
-
       if (stack > 0) {
         // Soft leave: keep the DB session active so a subsequent join_table
-        // re-seats the user with `currentStack` (no second buy-in). Schedule
-        // a grace timer so abandoned seats still clean up — the iOS lobby
-        // and the TABLE_IDLE_MS sweep both align with this window.
-        const key = cleanupKey(tableId, userId);
-        const t = setTimeout(() => {
-          sessionCleanupTimers.delete(key);
-          void autoLeave(userId, tableId);
-        }, LEAVE_GRACE_MS);
-        sessionCleanupTimers.set(key, t);
+        // re-seats the user with `currentStack` (no second buy-in). Stamp
+        // `disconnectedAt` so the DB-driven sweeper auto-leaves them if
+        // they don't come back within LEAVE_GRACE_MS.
+        await markSessionDisconnected(userId, tableId);
       } else {
         // Hard leave (busted, or seat already gone): free the slot now so
         // the lobby stops counting them as seated.
@@ -456,19 +498,14 @@ export function registerSocketHandlers(io: SocketServer): void {
         if (engine) engine.setConnected(userId, false);
         socket.to(tableRoom(tableId)).emit('player_disconnected', { event: 'player_disconnected', data: { userId, username }, ts: Date.now() });
 
-        // Schedule a grace-period auto-leave. If the user reconnects via
-        // join_table before this fires, the timer is cancelled there. If
-        // they don't come back, we free their seat (chips returned, lobby
-        // count decremented, table closed if empty) so the lobby doesn't
-        // show ghost players forever.
-        const key = cleanupKey(tableId, userId);
-        const existing = sessionCleanupTimers.get(key);
-        if (existing) clearTimeout(existing);
-        const timer = setTimeout(() => {
-          sessionCleanupTimers.delete(key);
-          void autoLeave(userId, tableId);
-        }, DISCONNECT_GRACE_MS);
-        sessionCleanupTimers.set(key, timer);
+        // Stamp the session as disconnected. The periodic sweeper picks
+        // up rows older than DISCONNECT_GRACE_MS and runs autoLeave. If
+        // the user reconnects via join_table before then, that handler
+        // clears the stamp and the row is no longer a sweep candidate.
+        // Using the DB (vs an in-memory setTimeout) means cleanup
+        // survives process restarts — load-test bots that died during a
+        // Railway redeploy used to leak sessions forever this way.
+        void markSessionDisconnected(userId, tableId);
       }
     });
   });
