@@ -37,3 +37,4 @@ prisma/.env
 
 # ─── Test artifacts ───────────────────────────────────────────────────────────
 .jest-cache/
+scripts/.loadtest-tokens.json

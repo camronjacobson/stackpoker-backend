@@ -552,10 +552,20 @@ export class PokerGameEngine {
       let maxRaise = seat.stack + seat.betThisStreet;
 
       // Pot Limit for PLO: max raise = pot + call + call
+      // Use `totalContributed` summed across all seats as the pot size — this
+      // includes both prior-street chips AND the current betThisStreet. The
+      // previous formula `totalPot(state.pots) + sum(betThisStreet)` was wrong
+      // mid-hand because `state.pots` is only built at endHand and
+      // betThisStreet is reset to 0 each new street. Result: postflop
+      // potAfterCall computed as 0, so no RAISE was ever legal — the iOS
+      // action bar collapsed to just All-In, matching the bug report.
       if (this.state.gameType === 'PLO') {
-        const potAfterCall = totalPot(this.state.pots) +
-          this.state.seats.reduce((s, p) => s + p.betThisStreet, 0) + toCall;
-        const potLimitMax = potAfterCall + toCall + seat.betThisStreet;
+        const potCommitted = this.state.seats.reduce(
+          (s, p) => s + p.totalContributed,
+          0,
+        );
+        const potAfterCall = potCommitted + toCall;
+        const potLimitMax  = potAfterCall + toCall + seat.betThisStreet;
         maxRaise = Math.min(maxRaise, potLimitMax);
       }
 
@@ -755,6 +765,17 @@ export class PokerGameEngine {
     // event. `mucked` is cleared at the start of the next hand reset.
     seat.mucked = seat.holeCards;
     seat.holeCards = [];
+
+    // Bot auto-show: when StackBot folds, reveal its full mucked hand the
+    // same way a human can tap "show cards". Lets the table see what the bot
+    // laid down and exercises the reveal animation in the empty-room dev
+    // flow. `voluntaryShownCardIndices` is what `buildClientView` reads to
+    // build the `revealedCards` array; indices outside `mucked.length` are
+    // filtered there, so passing 0..n-1 is safe for both Holdem (2) and PLO
+    // (4) without per-game branching.
+    if (seat.isBot) {
+      seat.voluntaryShownCardIndices = seat.mucked.map((_, i) => i);
+    }
   }
 
   private checkPlayer(seat: Seat): void {
@@ -809,9 +830,14 @@ export class PokerGameEngine {
     // hint. Mirrors the calculation in `getLegalActions` line ~305.
     if (this.state.gameType === 'PLO') {
       const toCall = this.state.currentBet - seat.betThisStreet;
-      const potAfterCall = totalPot(this.state.pots) +
-        this.state.seats.reduce((s, p) => s + p.betThisStreet, 0) + toCall;
-      const potLimitMax = potAfterCall + toCall + seat.betThisStreet;
+      // Mirror the corrected formula in getLegalActions — totalContributed
+      // sum is the true pot size mid-hand (state.pots only fills at endHand).
+      const potCommitted = this.state.seats.reduce(
+        (s, p) => s + p.totalContributed,
+        0,
+      );
+      const potAfterCall = potCommitted + toCall;
+      const potLimitMax  = potAfterCall + toCall + seat.betThisStreet;
       if (totalBet > potLimitMax) {
         return { ok: false, error: `PLO raise cannot exceed pot limit ${potLimitMax}` };
       }

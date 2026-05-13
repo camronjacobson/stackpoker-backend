@@ -143,8 +143,12 @@ export function evaluateHand(cards: Card[]): EvaluatedHand {
 }
 
 /**
- * Evaluate the best PLO hand. Pokersolver's 'omaha' mode enforces
- * "exactly 2 hole + exactly 3 board" natively.
+ * Evaluate the best PLO hand. PLO requires **exactly 2 hole cards + exactly
+ * 3 board cards** — pokersolver's 'omaha' game flag does NOT enforce this
+ * (it falls back to the standard 5-from-9 evaluator), so we enumerate the
+ * 60 valid combinations (C(4,2) × C(5,3) = 6 × 10 = 60 max) and pick the
+ * best.
+ *
  * Throws on invalid input (wrong counts, duplicate cards).
  */
 export function evaluatePLOHand(holeCards: Card[], boardCards: Card[]): EvaluatedHand {
@@ -155,9 +159,45 @@ export function evaluatePLOHand(holeCards: Card[], boardCards: Card[]): Evaluate
     throw new Error(`PLO expects 3–5 board cards, got ${boardCards.length}`);
   }
   ensureUnique([...holeCards, ...boardCards]);
-  const all = [...holeCards, ...boardCards].map(toSolverCard);
-  const hand = Hand.solve(all, 'omaha');
-  return solverHandToEvaluated(hand);
+
+  // Enumerate all (2 hole) × (3 board) combinations. Solve each as a plain
+  // 5-card hand (pokersolver standard) and keep the best by Hand.winners.
+  const holePairs   = pickK(holeCards, 2);
+  const boardTrios  = pickK(boardCards, 3);
+
+  let bestSolver: any | null = null;
+  for (const h of holePairs) {
+    for (const b of boardTrios) {
+      const five = [...h, ...b].map(toSolverCard);
+      const solved = Hand.solve(five);
+      if (!bestSolver) { bestSolver = solved; continue; }
+      // Hand.winners returns the surviving hand(s); first survivor is the
+      // better hand (or either on tie — we just keep current).
+      const winners: any[] = Hand.winners([bestSolver, solved]);
+      if (winners.length === 1 && winners[0] === solved) {
+        bestSolver = solved;
+      }
+    }
+  }
+  return solverHandToEvaluated(bestSolver);
+}
+
+// k-combinations helper. Returns every length-k subset of `arr` (order
+// within each subset preserved from the input). Used only by PLO's
+// 60-combination enumeration, so iterative & non-recursive isn't worth the
+// complexity — depth maxes at 3.
+function pickK<T>(arr: T[], k: number): T[][] {
+  const out: T[][] = [];
+  const recurse = (start: number, chosen: T[]): void => {
+    if (chosen.length === k) { out.push(chosen.slice()); return; }
+    for (let i = start; i < arr.length; i++) {
+      chosen.push(arr[i]);
+      recurse(i + 1, chosen);
+      chosen.pop();
+    }
+  };
+  recurse(0, []);
+  return out;
 }
 
 /**

@@ -126,7 +126,24 @@ export async function grantChips(
   amount: number
 ): Promise<void> {
   const requester = await prisma.user.findUnique({ where: { id: requesterId } });
-  if (!requester?.isAdmin) throw { code: 'FORBIDDEN', message: 'Admin only' };
+  if (!requester) throw { code: 'NOT_FOUND', message: 'Requester not found' };
+
+  // PLAYTEST CARVE-OUT — revert before App Store submission.
+  //
+  // The iOS "Top up chips" dev button calls this endpoint with the caller's
+  // OWN userId as the target. During playtesting we want everyone (not just
+  // admins) to be able to top themselves up so testing sessions don't stall
+  // on bankroll. Granting chips to *other* users remains admin-only — that
+  // path can drain or pump arbitrary accounts and is not what the dev
+  // button does.
+  //
+  // App Store launch checklist: remove this branch (or gate it behind an
+  // env flag like PLAYTEST_MODE=true) before submission so non-admins
+  // cannot mint their own balance in the production build.
+  const isSelfGrant = requesterId === targetUserId;
+  if (!requester.isAdmin && !isSelfGrant) {
+    throw { code: 'FORBIDDEN', message: 'Admin only' };
+  }
   if (amount <= 0 || amount > 10_000_000) throw { code: 'INVALID', message: 'Invalid amount' };
 
   await prisma.$transaction([
