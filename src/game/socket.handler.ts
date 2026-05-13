@@ -115,6 +115,10 @@ async function forceCloseIdleTable(io: SocketServer, tableId: string): Promise<v
       })
     );
     for (const s of sessions) {
+      // Skip the credit for sessions that already had chips returned via
+      // softLeaveCashOut — re-incrementing here would double-pay. The
+      // CASH_OUT transaction was written at soft-leave time.
+      if (s.chipsReturned) continue;
       ops.push(
         prisma.user.update({
           where: { id: s.userId },
@@ -292,10 +296,29 @@ export function registerSocketHandlers(io: SocketServer): void {
       try {
         const { tableId } = payload;
 
+        // Re-debit the wallet if the user soft-left with chips and is now
+        // returning. This MUST run before we read the session below so the
+        // chipsReturned flag is cleared atomically with the chip transfer
+        // — otherwise a second `join_table` racing this one could see
+        // chipsReturned still true and try to re-debit again. Throws
+        // INSUFFICIENT_CHIPS if the user spent the cashed-out chips
+        // elsewhere; we surface that as a normal error event.
+        try {
+          await lobbyService.rejoinRedebit(userId, tableId);
+        } catch (err: any) {
+          if (err?.code === 'INSUFFICIENT_CHIPS') {
+            emit(socket, 'error', { code: err.code, message: err.message });
+            return;
+          }
+          throw err;
+        }
+
         // Reconnecting before the grace period elapsed — clear the
         // disconnect stamp so the sweeper stops considering this session a
         // cleanup candidate. Safe to fire-and-await even if the column was
-        // already null (updateMany is a no-op in that case).
+        // already null (updateMany is a no-op in that case). rejoinRedebit
+        // also clears it on the soft-leave path; this covers plain socket
+        // drops where chipsReturned was never set.
         await clearSessionDisconnected(userId, tableId);
 
         const session = await prisma.tableSession.findUnique({
@@ -432,11 +455,26 @@ export function registerSocketHandlers(io: SocketServer): void {
       (socket as any).currentTableId = null;
 
       if (stack > 0) {
-        // Soft leave: keep the DB session active so a subsequent join_table
-        // re-seats the user with `currentStack` (no second buy-in). Stamp
-        // `disconnectedAt` so the DB-driven sweeper auto-leaves them if
-        // they don't come back within LEAVE_GRACE_MS.
-        await markSessionDisconnected(userId, tableId);
+        // Soft leave (Option C): return chips to the wallet IMMEDIATELY so
+        // the user sees the cash-out reflected in their lobby balance right
+        // away, while keeping the DB session row active so a rejoin within
+        // grace can re-debit and reseat at the same stack. The sweeper
+        // calls leaveTable after the grace window, which sees
+        // `chipsReturned=true` and skips the credit so chips are never
+        // paid twice.
+        try {
+          await lobbyService.softLeaveCashOut(userId, tableId);
+        } catch (err: any) {
+          if (err?.code === 'GAME_IN_PROGRESS') {
+            // Engine already removed the seat above; the hand-end cleanup
+            // path will cash them out at end-of-hand. Fall back to the
+            // legacy "stamp disconnect" behavior so the sweeper handles it.
+            await markSessionDisconnected(userId, tableId);
+          } else {
+            logger.error('softLeaveCashOut failed:', err);
+            await markSessionDisconnected(userId, tableId);
+          }
+        }
       } else {
         // Hard leave (busted, or seat already gone): free the slot now so
         // the lobby stops counting them as seated.

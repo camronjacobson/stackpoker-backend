@@ -298,25 +298,34 @@ export async function leaveTable(userId: string, tableId: string): Promise<{ chi
 
   const stack = session.currentStack;
 
-  await prisma.$transaction([
+  // If chips were already credited via softLeaveCashOut, just close the
+  // session — re-incrementing chipBalance here would double-pay. The
+  // CASH_OUT transaction was already written at soft-leave time, so the
+  // user's transaction log already shows the cash-out.
+  const ops: any[] = [
     prisma.tableSession.update({
       where: { id: session.id },
-      data: { isActive: false, leftAt: new Date() },
+      data: { isActive: false, leftAt: new Date(), chipsReturned: false },
     }),
-    prisma.user.update({
-      where: { id: userId },
-      data: { chipBalance: { increment: stack } },
-    }),
-    prisma.chipTransaction.create({
-      data: {
-        recipientId: userId,
-        amount: stack,
-        type: 'CASH_OUT',
-        tableId,
-        description: `Cash out from table`,
-      },
-    }),
-  ]);
+  ];
+  if (!session.chipsReturned) {
+    ops.push(
+      prisma.user.update({
+        where: { id: userId },
+        data: { chipBalance: { increment: stack } },
+      }),
+      prisma.chipTransaction.create({
+        data: {
+          recipientId: userId,
+          amount: stack,
+          type: 'CASH_OUT',
+          tableId,
+          description: `Cash out from table`,
+        },
+      }),
+    );
+  }
+  await prisma.$transaction(ops);
 
   // Close table if owner left and no other players
   const remaining = await prisma.tableSession.count({
@@ -329,8 +338,109 @@ export async function leaveTable(userId: string, tableId: string): Promise<{ chi
     });
   }
 
-  logger.info(`User ${userId} left table ${tableId}, returned ${stack} chips`);
+  const returned = session.chipsReturned ? 0n : stack;
+  logger.info(`User ${userId} left table ${tableId}, returned ${returned} chips (already-credited=${session.chipsReturned})`);
+  return { chipsReturned: returned.toString() };
+}
+
+// ─── Soft-leave cash-out (Option C) ──────────────────────────────────────────
+// Called from the leave_table socket handler when a user taps Leave Table
+// with chips still on the seat. Returns chips to wallet immediately so the
+// lobby balance reflects the cash-out without waiting for the grace window,
+// while keeping the DB session row alive (chipsReturned=true,
+// disconnectedAt=now) so a Rejoin within grace can re-debit the wallet and
+// reseat the user at the same stack. If the user doesn't come back, the
+// sweeper calls leaveTable above which sees chipsReturned=true and skips
+// the credit so chips are never paid twice.
+export async function softLeaveCashOut(userId: string, tableId: string): Promise<{ chipsReturned: string }> {
+  const session = await prisma.tableSession.findUnique({
+    where: { tableId_userId: { tableId, userId } },
+  });
+  if (!session || !session.isActive) {
+    throw { code: 'NOT_AT_TABLE', message: 'You are not at this table' };
+  }
+  // Already cashed-out and waiting for rejoin — just refresh the timer.
+  if (session.chipsReturned) {
+    await prisma.tableSession.update({
+      where: { id: session.id },
+      data: { disconnectedAt: new Date() },
+    });
+    return { chipsReturned: '0' };
+  }
+  const table = await prisma.pokerTable.findUnique({ where: { id: tableId } });
+  if (table?.status === 'IN_PROGRESS') {
+    throw { code: 'GAME_IN_PROGRESS', message: 'Cannot leave during a hand. Wait for the hand to end.' };
+  }
+
+  const stack = session.currentStack;
+  await prisma.$transaction([
+    prisma.tableSession.update({
+      where: { id: session.id },
+      data: { chipsReturned: true, disconnectedAt: new Date() },
+    }),
+    prisma.user.update({
+      where: { id: userId },
+      data: { chipBalance: { increment: stack } },
+    }),
+    prisma.chipTransaction.create({
+      data: {
+        recipientId: userId,
+        amount: stack,
+        type: 'CASH_OUT',
+        tableId,
+        description: `Cash out (rejoin pending)`,
+      },
+    }),
+  ]);
+
+  logger.info(`User ${userId} soft-left table ${tableId}, returned ${stack} chips (seat held for rejoin)`);
   return { chipsReturned: stack.toString() };
+}
+
+// ─── Rejoin re-debit (Option C) ──────────────────────────────────────────────
+// Called from join_table when the user reconnects to a seat that was
+// soft-left (chipsReturned=true). Re-debits the wallet and clears the
+// soft-leave flags so the session is back to a normal active state with the
+// engine. Throws INSUFFICIENT_CHIPS if the user spent the cashed-out chips
+// elsewhere in the meantime.
+export async function rejoinRedebit(userId: string, tableId: string): Promise<void> {
+  const session = await prisma.tableSession.findUnique({
+    where: { tableId_userId: { tableId, userId } },
+  });
+  if (!session || !session.isActive || !session.chipsReturned) return;
+
+  const user = await prisma.user.findUnique({ where: { id: userId } });
+  const stack = session.currentStack;
+  if (!user || user.chipBalance < stack) {
+    throw {
+      code: 'INSUFFICIENT_CHIPS',
+      message: `Not enough chips to reseat. Need ${stack.toString()} but have ${(user?.chipBalance ?? 0n).toString()}.`,
+    };
+  }
+
+  await prisma.$transaction([
+    prisma.tableSession.update({
+      where: { id: session.id },
+      data: { chipsReturned: false, disconnectedAt: null },
+    }),
+    prisma.user.update({
+      where: { id: userId },
+      data: { chipBalance: { decrement: stack } },
+    }),
+    prisma.chipTransaction.create({
+      data: {
+        // Match the existing buy-in convention: recipient=user, negative
+        // amount denotes chips leaving the wallet to the table.
+        recipientId: userId,
+        amount: -stack,
+        type: 'BUY_IN',
+        tableId,
+        description: `Rejoin reseat`,
+      },
+    }),
+  ]);
+
+  logger.info(`User ${userId} rejoined table ${tableId}, re-debited ${stack} chips`);
 }
 
 // ─── Top Up Chips (mid-table rebuy) ───────────────────────────────────────────

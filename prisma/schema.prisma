@@ -129,6 +129,15 @@ model TableSession {
   // and runs autoLeave on them, so cleanup survives process restarts that
   // would have wiped an in-memory timer Map.
   disconnectedAt DateTime?
+  // True when the user has explicitly tapped Leave Table with chips on the
+  // seat — we credit `currentStack` back to their wallet immediately (so the
+  // lobby balance updates without waiting for the grace window) while
+  // keeping the row active so a rejoin within grace can re-debit and
+  // re-seat at the same stack. Distinguishes the "intentional cash-out, may
+  // come back" state from a plain socket drop (where chips stay on the
+  // table until grace expires). Set false on rejoin; the sweeper / autoLeave
+  // checks the flag so chips are never credited twice.
+  chipsReturned Boolean @default(false)
 
   table PokerTable @relation(fields: [tableId], references: [id], onDelete: Cascade)
   user  User       @relation(fields: [userId], references: [id])
