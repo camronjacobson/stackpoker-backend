@@ -144,6 +144,33 @@ class GameRoomManager {
       );
 
       logger.info(`Hand #${state.handNumber} persisted for table ${tableId}`);
+
+      // ── Bot bust-out: remove StackBot from the session when it busts ──
+      // A human who busts gets parked at SITTING_OUT so they can manually
+      // top up and rejoin (gameEngine end-hand cleanup at lines ~1497-1498).
+      // The bot has no one to "top up" for it, so leaving it parked at
+      // stack=0 just clogs the seat — the table can't fill the slot, and
+      // canStartHand keeps gating on a SITTING_OUT seat that will never
+      // wake. Splice the bot out of the engine and mark its DB session
+      // inactive so the slot frees up for a real player to join.
+      //
+      // We do this in persistHandResult (rather than in gameEngine's own
+      // cleanup) because the engine is intentionally agnostic of the DB
+      // layer — only the room manager owns the tableSession lifecycle.
+      const engineNow = this.engines.get(tableId);
+      if (engineNow) {
+        const bustedBots = engineNow.getState().seats.filter(
+          s => s.isBot && s.stack === 0,
+        );
+        for (const bot of bustedBots) {
+          engineNow.removePlayer(bot.userId);
+          await prisma.tableSession.updateMany({
+            where: { tableId, userId: bot.userId, isActive: true },
+            data:  { isActive: false, leftAt: new Date() },
+          });
+          logger.info(`Bot ${bot.username} busted at table ${tableId} — removed from session`);
+        }
+      }
     } catch (err) {
       logger.error('Failed to persist hand:', err);
     }

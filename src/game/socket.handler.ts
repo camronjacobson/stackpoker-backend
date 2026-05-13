@@ -5,7 +5,6 @@ import { ServerGameState } from './gameState.types';
 import { roomManager } from './roomManager';
 import { logger } from '../shared/utils';
 import { PrismaClient } from '@prisma/client';
-import { generateBotReply, botTypingDelayMs } from './botChat';
 import * as lobbyService from '../lobby/lobby.service';
 
 // MAP: socket.handler — Socket.IO event routing for /game ns (382 lines)
@@ -488,31 +487,10 @@ export function registerSocketHandlers(io: SocketServer): void {
       const cleanMsg = message.trim();
       markTableActive(tableId);
       io.to(tableRoom(tableId)).emit('table_chat', { event: 'table_chat', data: { userId, username, message: cleanMsg, ts: Date.now() }, ts: Date.now() });
-
-      // If the sender isn't the bot and a bot is at the table, have StackBot
-      // reply with poker-flavoured chat after a short typing delay.
-      const engine = roomManager.get(tableId);
-      const botSeat = engine?.getState().seats.find(s => s.isBot);
-      if (!botSeat || botSeat.userId === userId) return;
-
-      const reply = generateBotReply(cleanMsg);
-      if (!reply) return;
-      const delay = botTypingDelayMs(reply);
-      setTimeout(() => {
-        // Re-check the bot is still seated in case they left mid-delay
-        const stillThere = roomManager.get(tableId)?.getState().seats.find(s => s.isBot);
-        if (!stillThere) return;
-        io.to(tableRoom(tableId)).emit('table_chat', {
-          event: 'table_chat',
-          data: {
-            userId:   stillThere.userId,
-            username: stillThere.username,
-            message:  reply,
-            ts:       Date.now(),
-          },
-          ts: Date.now(),
-        });
-      }, delay);
+      // Bot chat reply was removed — StackBot is silent. The keyword-driven
+      // canned replies (see deleted botChat.ts) felt off-brand and produced
+      // noise in the chat feed. Human-to-human chat still flows through the
+      // emit above.
     });
 
     socket.on('admin_kick', async (payload: { tableId: string; targetUserId: string }) => {
