@@ -157,7 +157,21 @@ lobbyRouter.post('/:id/topup',
       //     drains it into `stack` at endHand and roomManager persists.
       if (engine) {
         if (handActive) engine.queueTopUp(userId, amount);
-        else            engine.setStack(userId, parseInt(result.newStack, 10));
+        else {
+          engine.setStack(userId, parseInt(result.newStack, 10));
+          // Bust-then-rebuy kickstart: a player who busted out is parked at
+          // SITTING_OUT with stack=0 (gameEngine.endHand cleanup). When they
+          // top up between hands, setStack flips them back to WAITING, but
+          // nothing else triggers a fresh deal — endHand's own startHand
+          // call already ran with too few eligible seats and the socket
+          // join_table flow won't re-fire without a reconnect. Without this
+          // kick, a heads-up vs. StackBot table deadlocks at the "Invite
+          // friends" empty state forever after a bust + rebuy. Match the
+          // 1500ms delay used elsewhere (socket join_table, bot session
+          // start) so the iOS chip-arrival animation has a moment to land
+          // before the new hand's deal animation starts on top of it.
+          if (engine.canStartHand()) setTimeout(() => engine.startHand(), 1500);
+        }
       }
 
       sendSuccess(res, result);

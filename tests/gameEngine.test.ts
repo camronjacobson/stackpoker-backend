@@ -240,4 +240,47 @@ describe('PokerGameEngine', () => {
       expect(newState.currentBet).toBeGreaterThan(state.bigBlind);
     }
   });
+
+  // ─── Bust + rebuy (regression for "table deadlocks at Invite Friends") ───
+  // A heads-up table (e.g. user vs. StackBot) where the human busts to 0
+  // chips parks the human at SITTING_OUT (gameEngine.endHand cleanup). The
+  // bot stays WAITING with chips. Pre-fix, the topup REST route called
+  // engine.setStack with the new chip total but never flipped the seat's
+  // SITTING_OUT status back to WAITING — so canStartHand still saw only one
+  // eligible seat and the table never dealt another hand. The iOS client
+  // rendered the empty-seat "Invite Friends" CTA forever.
+  test('setStack on a SITTING_OUT busted seat un-busts the player', () => {
+    const { engine } = makeEngine(2);
+    const before = engine.getState();
+    const player = before.seats[0];
+    // Simulate the engine's post-bust cleanup: stack=0, status=SITTING_OUT.
+    // (Going through a full play-to-bust would require driving the bot
+    // through arbitrary hands — a direct state mutation hits the exact
+    // shape that endHand's setTimeout produces in production.)
+    player.stack  = 0;
+    player.status = 'SITTING_OUT';
+    expect(engine.canStartHand()).toBe(false); // only 1 eligible seat
+
+    engine.setStack(player.userId, 500); // user rebuys
+
+    const after = engine.getState();
+    const restored = after.seats.find(s => s.userId === player.userId)!;
+    expect(restored.stack).toBe(500);
+    expect(restored.status).toBe('WAITING');
+    expect(engine.canStartHand()).toBe(true);
+  });
+
+  test('setStack on an active seat does not change status', () => {
+    const { engine } = makeEngine(2);
+    const state = engine.getState();
+    const seat = state.seats[0];
+    expect(seat.status).toBe('WAITING');
+
+    engine.setStack(seat.userId, 2000);
+
+    const after = engine.getState();
+    const updated = after.seats.find(s => s.userId === seat.userId)!;
+    expect(updated.stack).toBe(2000);
+    expect(updated.status).toBe('WAITING'); // unchanged
+  });
 });

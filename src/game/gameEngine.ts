@@ -199,10 +199,20 @@ export class PokerGameEngine {
   // safe to call between hands — the route layer is responsible for that
   // gate (see lobbyService.topUpChips). Emits so connected clients see the
   // new stack immediately rather than waiting for the next hand reload.
+  //
+  // A SITTING_OUT seat that just received positive chips is the bust-then-
+  // rebuy case (gameEngine.ts:1497 parks busted players at SITTING_OUT with
+  // stack=0). Without flipping back to WAITING the seat would stay invisible
+  // to canStartHand, and a heads-up table with a bot opponent would deadlock
+  // — only one eligible seat means no further hands ever start. Mirrors the
+  // identical SITTING_OUT→WAITING transition in `applyPendingTopUps`.
   setStack(userId: string, stack: number): void {
     const seat = this.state.seats.find(s => s.userId === userId);
     if (!seat) return;
     seat.stack = stack;
+    if (seat.status === 'SITTING_OUT' && seat.stack > 0) {
+      seat.status = 'WAITING';
+    }
     this.emit();
   }
 
