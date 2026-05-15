@@ -13,46 +13,48 @@ datasource db {
 // ─── USERS ──────────────────────────────────────────────────────────────────
 
 model User {
-  id            String    @id @default(uuid())
-  email         String?   @unique
-  appleId       String?   @unique
-  passwordHash  String?
-  username      String    @unique
-  displayName   String
-  avatarId      String    @default("avatar_1")
-  avatarUrl     String?
-  chipBalance   BigInt    @default(10000)
-  totalWon      BigInt    @default(0)
-  totalLost     BigInt    @default(0)
-  handsPlayed   Int       @default(0)
+  id           String   @id @default(uuid())
+  email        String?  @unique
+  appleId      String?  @unique
+  passwordHash String?
+  username     String   @unique
+  displayName  String
+  avatarId     String   @default("avatar_1")
+  avatarUrl    String?
+  chipBalance  BigInt   @default(10000)
+  totalWon     BigInt   @default(0)
+  totalLost    BigInt   @default(0)
+  handsPlayed  Int      @default(0)
   // Voluntarily-put-money-in-pot count. Incremented per hand where the
   // player called or raised preflop (BB checking through is NOT voluntary,
   // so it does not increment). VPIP% is rendered client-side as
   // vpipHands / handsPlayed. Stored as a counter rather than a percentage so
   // we can recompute the ratio without losing precision over many hands.
-  vpipHands     Int       @default(0)
-  gamesPlayed   Int       @default(0)
-  isAdmin       Boolean   @default(false)
-  isBanned      Boolean   @default(false)
-  banReason     String?
-  createdAt     DateTime  @default(now())
-  updatedAt     DateTime  @updatedAt
-  lastSeenAt    DateTime  @default(now())
+  vpipHands    Int      @default(0)
+  gamesPlayed  Int      @default(0)
+  isAdmin      Boolean  @default(false)
+  isBanned     Boolean  @default(false)
+  banReason    String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  lastSeenAt   DateTime @default(now())
 
   // Relations
-  sessions          Session[]
-  ownedTables       PokerTable[]         @relation("TableOwner")
-  tableSessions     TableSession[]
-  sentFriendships   Friendship[]         @relation("FriendshipSender")
-  receivedFriendships Friendship[]       @relation("FriendshipReceiver")
-  ownedClubs        Club[]               @relation("ClubOwner")
-  clubMemberships   ClubMember[]
-  chipTransactionsSent     ChipTransaction[] @relation("ChipSender")
-  chipTransactionsReceived ChipTransaction[] @relation("ChipReceiver")
-  handHistories     HandHistory[]
-  clubMessages      ClubMessage[]
-  tableInvites      TableInvite[]        @relation("InviteRecipient")
-  sentInvites       TableInvite[]        @relation("InviteSender")
+  sessions                 Session[]
+  ownedTables              PokerTable[]        @relation("TableOwner")
+  tableSessions            TableSession[]
+  sentFriendships          Friendship[]        @relation("FriendshipSender")
+  receivedFriendships      Friendship[]        @relation("FriendshipReceiver")
+  ownedClubs               Club[]              @relation("ClubOwner")
+  clubMemberships          ClubMember[]
+  chipTransactionsSent     ChipTransaction[]   @relation("ChipSender")
+  chipTransactionsReceived ChipTransaction[]   @relation("ChipReceiver")
+  handHistories            HandHistory[]
+  clubMessages             ClubMessage[]
+  tableInvites             TableInvite[]       @relation("InviteRecipient")
+  sentInvites              TableInvite[]       @relation("InviteSender")
+  cosmeticOwnerships       CosmeticOwnership[]
+  equippedCosmetics        EquippedCosmetic[]
 
   @@map("users")
 }
@@ -60,15 +62,15 @@ model User {
 // ─── SESSIONS ───────────────────────────────────────────────────────────────
 
 model Session {
-  id           String   @id @default(uuid())
+  id           String    @id @default(uuid())
   userId       String
-  refreshToken String   @unique
+  refreshToken String    @unique
   deviceId     String?
   deviceName   String?
   ipAddress    String?
   userAgent    String?
   expiresAt    DateTime
-  createdAt    DateTime @default(now())
+  createdAt    DateTime  @default(now())
   revokedAt    DateTime?
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
@@ -79,29 +81,29 @@ model Session {
 // ─── POKER TABLES ───────────────────────────────────────────────────────────
 
 model PokerTable {
-  id            String       @id @default(uuid())
+  id            String      @id @default(uuid())
   name          String
-  joinCode      String       @unique @default(cuid())
+  joinCode      String      @unique @default(cuid())
   ownerId       String
   clubId        String?
-  status        TableStatus  @default(WAITING)
-  maxPlayers    Int          @default(6)
-  smallBlind    BigInt       @default(10)
-  bigBlind      BigInt       @default(20)
-  minBuyIn      BigInt       @default(200)
-  maxBuyIn      BigInt       @default(2000)
+  status        TableStatus @default(WAITING)
+  maxPlayers    Int         @default(6)
+  smallBlind    BigInt      @default(10)
+  bigBlind      BigInt      @default(20)
+  minBuyIn      BigInt      @default(200)
+  maxBuyIn      BigInt      @default(2000)
   currentHandId String?
-  gameType      String       @default("TEXAS_HOLDEM")
-  isPrivate     Boolean      @default(true)
-  createdAt     DateTime     @default(now())
-  updatedAt     DateTime     @updatedAt
+  gameType      String      @default("TEXAS_HOLDEM")
+  isPrivate     Boolean     @default(true)
+  createdAt     DateTime    @default(now())
+  updatedAt     DateTime    @updatedAt
   closedAt      DateTime?
 
-  owner         User           @relation("TableOwner", fields: [ownerId], references: [id])
-  club          Club?          @relation(fields: [clubId], references: [id])
-  sessions      TableSession[]
-  hands         HandHistory[]
-  invites       TableInvite[]
+  owner    User           @relation("TableOwner", fields: [ownerId], references: [id])
+  club     Club?          @relation(fields: [clubId], references: [id])
+  sessions TableSession[]
+  hands    HandHistory[]
+  invites  TableInvite[]
 
   @@map("poker_tables")
 }
@@ -114,15 +116,15 @@ enum TableStatus {
 }
 
 model TableSession {
-  id          String    @id @default(uuid())
-  tableId     String
-  userId      String
-  seatIndex   Int
-  buyInAmount BigInt
-  currentStack BigInt
-  isActive    Boolean   @default(true)
-  joinedAt    DateTime  @default(now())
-  leftAt      DateTime?
+  id             String    @id @default(uuid())
+  tableId        String
+  userId         String
+  seatIndex      Int
+  buyInAmount    BigInt
+  currentStack   BigInt
+  isActive       Boolean   @default(true)
+  joinedAt       DateTime  @default(now())
+  leftAt         DateTime?
   // Set when the user's socket drops or they tap "Leave Table" with chips
   // still in front of them. Null while the user is actively connected.
   // The socket sweeper looks for rows with `disconnectedAt < now - grace`
@@ -137,7 +139,7 @@ model TableSession {
   // come back" state from a plain socket drop (where chips stay on the
   // table until grace expires). Set false on rejoin; the sweeper / autoLeave
   // checks the flag so chips are never credited twice.
-  chipsReturned Boolean @default(false)
+  chipsReturned  Boolean   @default(false)
 
   table PokerTable @relation(fields: [tableId], references: [id], onDelete: Cascade)
   user  User       @relation(fields: [userId], references: [id])
@@ -150,12 +152,12 @@ model TableSession {
 // ─── TABLE INVITES ───────────────────────────────────────────────────────────
 
 model TableInvite {
-  id          String        @id @default(uuid())
+  id          String       @id @default(uuid())
   tableId     String
   senderId    String
   recipientId String
-  status      InviteStatus  @default(PENDING)
-  createdAt   DateTime      @default(now())
+  status      InviteStatus @default(PENDING)
+  createdAt   DateTime     @default(now())
   expiresAt   DateTime
 
   table     PokerTable @relation(fields: [tableId], references: [id], onDelete: Cascade)
@@ -198,35 +200,35 @@ enum FriendshipStatus {
 // ─── CLUBS ──────────────────────────────────────────────────────────────────
 
 model Club {
-  id          String      @id @default(uuid())
-  name        String      @unique
+  id          String   @id @default(uuid())
+  name        String   @unique
   description String?
   avatarUrl   String?
   ownerId     String
-  inviteCode  String      @unique @default(cuid())
-  isPublic    Boolean     @default(false)
-  maxMembers  Int         @default(50)
-  createdAt   DateTime    @default(now())
-  updatedAt   DateTime    @updatedAt
+  inviteCode  String   @unique @default(cuid())
+  isPublic    Boolean  @default(false)
+  maxMembers  Int      @default(50)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
-  owner   User         @relation("ClubOwner", fields: [ownerId], references: [id])
-  members ClubMember[]
-  tables  PokerTable[]
+  owner    User          @relation("ClubOwner", fields: [ownerId], references: [id])
+  members  ClubMember[]
+  tables   PokerTable[]
   messages ClubMessage[]
 
   @@map("clubs")
 }
 
 model ClubMember {
-  id       String    @id @default(uuid())
+  id       String   @id @default(uuid())
   clubId   String
   userId   String
-  role     ClubRole  @default(MEMBER)
-  joinedAt DateTime  @default(now())
+  role     ClubRole @default(MEMBER)
+  joinedAt DateTime @default(now())
 
   // Leaderboard stats
-  totalWon   BigInt @default(0)
-  handsPlayed Int   @default(0)
+  totalWon    BigInt @default(0)
+  handsPlayed Int    @default(0)
   rank        Int?
 
   club Club @relation(fields: [clubId], references: [id], onDelete: Cascade)
@@ -243,11 +245,11 @@ enum ClubRole {
 }
 
 model ClubMessage {
-  id        String   @id @default(uuid())
+  id        String    @id @default(uuid())
   clubId    String
   userId    String
   content   String
-  createdAt DateTime @default(now())
+  createdAt DateTime  @default(now())
   editedAt  DateTime?
   deletedAt DateTime?
 
@@ -260,20 +262,20 @@ model ClubMessage {
 // ─── HAND HISTORY ────────────────────────────────────────────────────────────
 
 model HandHistory {
-  id          String   @id @default(uuid())
-  tableId     String
-  handNumber  Int
-  dealerId    String?
+  id             String   @id @default(uuid())
+  tableId        String
+  handNumber     Int
+  dealerId       String?
   communityCards String[]
-  pot         BigInt
-  winnerId    String?
-  winnerIds   String[]
-  handStrength String?
-  duration    Int      // seconds
-  createdAt   DateTime @default(now())
+  pot            BigInt
+  winnerId       String?
+  winnerIds      String[]
+  handStrength   String?
+  duration       Int // seconds
+  createdAt      DateTime @default(now())
 
-  table   PokerTable    @relation(fields: [tableId], references: [id])
-  winner  User?         @relation(fields: [winnerId], references: [id])
+  table   PokerTable   @relation(fields: [tableId], references: [id])
+  winner  User?        @relation(fields: [winnerId], references: [id])
   actions HandAction[]
 
   @@map("hand_histories")
@@ -344,4 +346,67 @@ enum TransactionType {
   BUY_IN
   CASH_OUT
   ADMIN_GRANT
+  PURCHASE // cosmetics purchase — recipientId = buyer, amount = -priceChips
+}
+
+// ─── COSMETICS ───────────────────────────────────────────────────────────────
+//
+// Catalog moved server-side in Phase 3 (was bundled JSON in the iOS app).
+// Seeded from prisma/seeds/cosmetics_catalog.json — see prisma/seeds/cosmetics.ts.
+//
+// Three tables:
+//   Cosmetic            — catalog row, price-of-record
+//   CosmeticOwnership   — (user, cosmetic) join, immutable after purchase
+//   EquippedCosmetic    — (user, category) → cosmetic, mutable, one per slot
+//
+// Ownership and equip-state are intentionally split: a user can own many
+// cosmetics in a category but only one is equipped at a time. Phase 4 seat
+// broadcasts read EquippedCosmetic indexed by userId for a single-query lookup.
+
+model Cosmetic {
+  id               String    @id // e.g. "card_back_classic_red"
+  name             String
+  category         String // "cardBack" | "tableFelt" | etc.
+  rarity           String // "common" | "rare" | "epic" | "legendary"
+  priceChips       BigInt? // null = not purchasable (achievement / leaderboard / seasonPass). Invariant enforced by `cosmetics_price_purchase_invariant` CHECK constraint — see migration.
+  previewAssetName String?
+  unlockCondition  String    @default("purchase") // "purchase" | "achievement" | etc.
+  isLimitedTime    Boolean   @default(false)
+  availableUntil   DateTime? // server-time check at purchase
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+
+  ownerships CosmeticOwnership[]
+  equipped   EquippedCosmetic[]
+
+  @@map("cosmetics")
+}
+
+model CosmeticOwnership {
+  id         String   @id @default(uuid())
+  userId     String
+  cosmeticId String
+  acquiredAt DateTime @default(now())
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  cosmetic Cosmetic @relation(fields: [cosmeticId], references: [id])
+
+  @@unique([userId, cosmeticId]) // hard guard against double-buy
+  @@index([userId]) // Phase 4 inventory fetch
+  @@map("cosmetic_ownerships")
+}
+
+model EquippedCosmetic {
+  id         String   @id @default(uuid())
+  userId     String
+  category   String // "cardBack" | "tableFelt" | etc.
+  cosmeticId String
+  equippedAt DateTime @default(now())
+
+  user     User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  cosmetic Cosmetic @relation(fields: [cosmeticId], references: [id])
+
+  @@unique([userId, category]) // one equip per slot
+  @@index([userId]) // Phase 4 seat broadcast lookup
+  @@map("equipped_cosmetics")
 }

@@ -12,6 +12,7 @@ import { lobbyRouter }   from './lobby/lobby.routes';
 import { friendsRouter } from './friends/friends.routes';
 import { usersRouter }   from './users/users.routes';
 import { chipsRouter }   from './chips/chips.routes';
+import { cosmeticsRouter } from './cosmetics/cosmetics.routes';
 import { adminRouter }   from './game/admin.routes';
 import { botRouter }     from './game/bot.routes';
 import { apiRateLimit }  from './shared/middleware/rateLimit.middleware';
@@ -74,6 +75,7 @@ app.use('/api/tables', lobbyRouter);
 app.use('/api/friends', friendsRouter);
 app.use('/api/users',   usersRouter);
 app.use('/api/chips',   chipsRouter);
+app.use('/api/cosmetics', cosmeticsRouter);
 app.use('/api/admin',   adminRouter);
 app.use('/api/tables',  botRouter);
 

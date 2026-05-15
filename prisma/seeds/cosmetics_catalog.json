@@ -1,0 +1,567 @@
+{
+  "_meta": {
+    "schemaVersion": 1,
+    "_comment": "Seed catalog for Phase 1+2. Daily bonus = 1000 chips; common 0.5-2x, rare 5-15x, epic 25-60x, legendary 100-250x, mythic = unobtainable-via-purchase. Edit freely — no recompile required. previewAssetName uses cosmetic_<category>_<id> convention; missing assets fall back to programmatic placeholders per CosmeticImageView.",
+    "_migrationNote": "TODO Phase-5: catalog moves server-side for true LiveOps rotation. Until then, isLimitedTime items below are staggered with ~10 weeks of runway from 2026-05-14. When runway shrinks to <3 weeks, ship a TestFlight build with extended dates. Migration path: RemoteCosmeticsCatalog conforming to CosmeticsCatalogProtocol; swap in CosmeticsContainer.makeProduction()."
+  },
+  "cosmetics": [
+    {
+      "id": "card_back_classic_red",
+      "name": "Classic Red",
+      "category": "cardBack",
+      "rarity": "common",
+      "priceChips": 500,
+      "previewAssetName": "cosmetic_cardBack_classic_red",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "card_back_classic_blue",
+      "name": "Classic Blue",
+      "category": "cardBack",
+      "rarity": "common",
+      "priceChips": 500,
+      "previewAssetName": "cosmetic_cardBack_classic_blue",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "card_back_minimalist_white",
+      "name": "Minimalist White",
+      "category": "cardBack",
+      "rarity": "common",
+      "priceChips": 1500,
+      "previewAssetName": "cosmetic_cardBack_minimalist_white",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "card_back_vegas_neon",
+      "name": "Vegas Neon",
+      "category": "cardBack",
+      "rarity": "rare",
+      "priceChips": 7500,
+      "isLimitedTime": true,
+      "availableUntil": "2026-05-28T23:59:59Z",
+      "previewAssetName": "cosmetic_cardBack_vegas_neon",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "card_back_royal_gold",
+      "name": "Royal Gold",
+      "category": "cardBack",
+      "rarity": "rare",
+      "priceChips": 12000,
+      "previewAssetName": "cosmetic_cardBack_royal_gold",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "card_back_pixel_art",
+      "name": "Pixel Art",
+      "category": "cardBack",
+      "rarity": "rare",
+      "priceChips": 9000,
+      "previewAssetName": "cosmetic_cardBack_pixel_art",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "card_back_black_diamond",
+      "name": "Black Diamond",
+      "category": "cardBack",
+      "rarity": "legendary",
+      "priceChips": 175000,
+      "previewAssetName": "cosmetic_cardBack_black_diamond",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "card_back_holographic",
+      "name": "Holographic",
+      "category": "cardBack",
+      "rarity": "mythic",
+      "previewAssetName": "cosmetic_cardBack_holographic",
+      "unlockCondition": "leaderboard"
+    },
+
+    {
+      "id": "chip_set_standard_casino",
+      "name": "Standard Casino",
+      "category": "chipSet",
+      "rarity": "common",
+      "priceChips": 750,
+      "previewAssetName": "cosmetic_chipSet_standard_casino",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "chip_set_monte_carlo_pearl",
+      "name": "Monte Carlo Pearl",
+      "category": "chipSet",
+      "rarity": "rare",
+      "priceChips": 8500,
+      "isLimitedTime": true,
+      "availableUntil": "2026-06-04T23:59:59Z",
+      "previewAssetName": "cosmetic_chipSet_monte_carlo_pearl",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "chip_set_vegas_strip",
+      "name": "Vegas Strip",
+      "category": "chipSet",
+      "rarity": "rare",
+      "priceChips": 11000,
+      "previewAssetName": "cosmetic_chipSet_vegas_strip",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "chip_set_crypto_pack",
+      "name": "Crypto Pack",
+      "category": "chipSet",
+      "rarity": "rare",
+      "priceChips": 13500,
+      "previewAssetName": "cosmetic_chipSet_crypto_pack",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "chip_set_vintage_saloon",
+      "name": "Vintage Saloon",
+      "category": "chipSet",
+      "rarity": "rare",
+      "priceChips": 10000,
+      "previewAssetName": "cosmetic_chipSet_vintage_saloon",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "chip_set_liquid_gold",
+      "name": "Liquid Gold",
+      "category": "chipSet",
+      "rarity": "legendary",
+      "priceChips": 220000,
+      "previewAssetName": "cosmetic_chipSet_liquid_gold",
+      "unlockCondition": "purchase"
+    },
+
+    {
+      "id": "avatar_frame_bronze",
+      "name": "Bronze",
+      "category": "avatarFrame",
+      "rarity": "common",
+      "priceChips": 1000,
+      "previewAssetName": "cosmetic_avatarFrame_bronze",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "avatar_frame_silver",
+      "name": "Silver",
+      "category": "avatarFrame",
+      "rarity": "common",
+      "priceChips": 2000,
+      "previewAssetName": "cosmetic_avatarFrame_silver",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "avatar_frame_gold",
+      "name": "Gold",
+      "category": "avatarFrame",
+      "rarity": "rare",
+      "priceChips": 7500,
+      "previewAssetName": "cosmetic_avatarFrame_gold",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "avatar_frame_platinum",
+      "name": "Platinum",
+      "category": "avatarFrame",
+      "rarity": "rare",
+      "priceChips": 13000,
+      "previewAssetName": "cosmetic_avatarFrame_platinum",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "avatar_frame_diamond",
+      "name": "Diamond",
+      "category": "avatarFrame",
+      "rarity": "epic",
+      "priceChips": 45000,
+      "isLimitedTime": true,
+      "availableUntil": "2026-06-11T23:59:59Z",
+      "previewAssetName": "cosmetic_avatarFrame_diamond",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "avatar_frame_royal",
+      "name": "Royal",
+      "category": "avatarFrame",
+      "rarity": "epic",
+      "priceChips": 55000,
+      "previewAssetName": "cosmetic_avatarFrame_royal",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "avatar_frame_champion",
+      "name": "Champion",
+      "category": "avatarFrame",
+      "rarity": "legendary",
+      "previewAssetName": "cosmetic_avatarFrame_champion",
+      "unlockCondition": "leaderboard"
+    },
+    {
+      "id": "avatar_frame_mythic_inferno",
+      "name": "Mythic Inferno",
+      "category": "avatarFrame",
+      "rarity": "mythic",
+      "previewAssetName": "cosmetic_avatarFrame_mythic_inferno",
+      "unlockCondition": "seasonPass"
+    },
+
+    {
+      "id": "table_felt_classic_green",
+      "name": "Classic Green",
+      "category": "tableFelt",
+      "rarity": "common",
+      "priceChips": 1500,
+      "previewAssetName": "cosmetic_tableFelt_classic_green",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "table_felt_monte_carlo_red",
+      "name": "Monte Carlo Red",
+      "category": "tableFelt",
+      "rarity": "rare",
+      "priceChips": 8500,
+      "previewAssetName": "cosmetic_tableFelt_monte_carlo_red",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "table_felt_neon_tokyo",
+      "name": "Neon Tokyo",
+      "category": "tableFelt",
+      "rarity": "rare",
+      "priceChips": 14000,
+      "isLimitedTime": true,
+      "availableUntil": "2026-06-18T23:59:59Z",
+      "previewAssetName": "cosmetic_tableFelt_neon_tokyo",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "table_felt_underwater",
+      "name": "Underwater",
+      "category": "tableFelt",
+      "rarity": "epic",
+      "priceChips": 30000,
+      "previewAssetName": "cosmetic_tableFelt_underwater",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "table_felt_space_casino",
+      "name": "Space Casino",
+      "category": "tableFelt",
+      "rarity": "epic",
+      "priceChips": 50000,
+      "previewAssetName": "cosmetic_tableFelt_space_casino",
+      "unlockCondition": "purchase"
+    },
+
+    {
+      "id": "card_face_standard",
+      "name": "Standard",
+      "category": "cardFace",
+      "rarity": "common",
+      "previewAssetName": "cosmetic_cardFace_standard",
+      "unlockCondition": "achievement"
+    },
+    {
+      "id": "card_face_art_deco",
+      "name": "Art Deco",
+      "category": "cardFace",
+      "rarity": "rare",
+      "priceChips": 12500,
+      "isLimitedTime": true,
+      "availableUntil": "2026-06-25T23:59:59Z",
+      "previewAssetName": "cosmetic_cardFace_art_deco",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "card_face_royal_court",
+      "name": "Royal Court",
+      "category": "cardFace",
+      "rarity": "epic",
+      "priceChips": 40000,
+      "previewAssetName": "cosmetic_cardFace_royal_court",
+      "unlockCondition": "purchase"
+    },
+
+    {
+      "id": "deal_anim_classic_slide",
+      "name": "Classic Slide",
+      "category": "dealAnimation",
+      "rarity": "common",
+      "previewAssetName": "cosmetic_dealAnimation_classic_slide",
+      "unlockCondition": "achievement"
+    },
+    {
+      "id": "deal_anim_spiral",
+      "name": "Spiral",
+      "category": "dealAnimation",
+      "rarity": "rare",
+      "priceChips": 9500,
+      "previewAssetName": "cosmetic_dealAnimation_spiral",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "deal_anim_fan",
+      "name": "Fan",
+      "category": "dealAnimation",
+      "rarity": "rare",
+      "priceChips": 12000,
+      "previewAssetName": "cosmetic_dealAnimation_fan",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "deal_anim_lightning",
+      "name": "Lightning",
+      "category": "dealAnimation",
+      "rarity": "epic",
+      "priceChips": 35000,
+      "isLimitedTime": true,
+      "availableUntil": "2026-07-02T23:59:59Z",
+      "previewAssetName": "cosmetic_dealAnimation_lightning",
+      "unlockCondition": "purchase"
+    },
+
+    {
+      "id": "win_anim_chip_splash",
+      "name": "Chip Splash",
+      "category": "winAnimation",
+      "rarity": "common",
+      "priceChips": 1200,
+      "previewAssetName": "cosmetic_winAnimation_chip_splash",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "win_anim_fireworks",
+      "name": "Fireworks",
+      "category": "winAnimation",
+      "rarity": "common",
+      "priceChips": 1800,
+      "previewAssetName": "cosmetic_winAnimation_fireworks",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "win_anim_confetti",
+      "name": "Confetti",
+      "category": "winAnimation",
+      "rarity": "rare",
+      "priceChips": 6500,
+      "previewAssetName": "cosmetic_winAnimation_confetti",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "win_anim_gold_rain",
+      "name": "Gold Rain",
+      "category": "winAnimation",
+      "rarity": "epic",
+      "priceChips": 38000,
+      "isLimitedTime": true,
+      "availableUntil": "2026-07-16T23:59:59Z",
+      "previewAssetName": "cosmetic_winAnimation_gold_rain",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "win_anim_volcano",
+      "name": "Volcano",
+      "category": "winAnimation",
+      "rarity": "legendary",
+      "priceChips": 130000,
+      "previewAssetName": "cosmetic_winAnimation_volcano",
+      "unlockCondition": "purchase"
+    },
+
+    {
+      "id": "emote_thumbs_up",
+      "name": "Thumbs Up",
+      "category": "emote",
+      "rarity": "common",
+      "priceChips": 500,
+      "previewAssetName": "cosmetic_emote_thumbs_up",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "emote_wave",
+      "name": "Wave",
+      "category": "emote",
+      "rarity": "common",
+      "priceChips": 500,
+      "previewAssetName": "cosmetic_emote_wave",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "emote_laugh",
+      "name": "Laugh",
+      "category": "emote",
+      "rarity": "common",
+      "priceChips": 750,
+      "previewAssetName": "cosmetic_emote_laugh",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "emote_cry",
+      "name": "Cry",
+      "category": "emote",
+      "rarity": "common",
+      "priceChips": 750,
+      "previewAssetName": "cosmetic_emote_cry",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "emote_angry",
+      "name": "Angry",
+      "category": "emote",
+      "rarity": "common",
+      "priceChips": 1000,
+      "previewAssetName": "cosmetic_emote_angry",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "emote_wink",
+      "name": "Wink",
+      "category": "emote",
+      "rarity": "common",
+      "priceChips": 1000,
+      "previewAssetName": "cosmetic_emote_wink",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "emote_cool",
+      "name": "Cool",
+      "category": "emote",
+      "rarity": "common",
+      "priceChips": 1500,
+      "previewAssetName": "cosmetic_emote_cool",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "emote_shock",
+      "name": "Shock",
+      "category": "emote",
+      "rarity": "rare",
+      "priceChips": 5500,
+      "previewAssetName": "cosmetic_emote_shock",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "emote_skull",
+      "name": "Skull",
+      "category": "emote",
+      "rarity": "rare",
+      "priceChips": 6500,
+      "previewAssetName": "cosmetic_emote_skull",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "emote_fire",
+      "name": "Fire",
+      "category": "emote",
+      "rarity": "rare",
+      "priceChips": 8000,
+      "isLimitedTime": true,
+      "availableUntil": "2026-07-23T23:59:59Z",
+      "previewAssetName": "cosmetic_emote_fire",
+      "unlockCondition": "purchase"
+    },
+
+    {
+      "id": "title_rookie",
+      "name": "Rookie",
+      "category": "playerTitle",
+      "rarity": "common",
+      "previewAssetName": "cosmetic_playerTitle_rookie",
+      "unlockCondition": "achievement"
+    },
+    {
+      "id": "title_high_roller",
+      "name": "High Roller",
+      "category": "playerTitle",
+      "rarity": "rare",
+      "previewAssetName": "cosmetic_playerTitle_high_roller",
+      "unlockCondition": "achievement"
+    },
+    {
+      "id": "title_tournament_champion",
+      "name": "Tournament Champion",
+      "category": "playerTitle",
+      "rarity": "epic",
+      "previewAssetName": "cosmetic_playerTitle_tournament_champion",
+      "unlockCondition": "achievement"
+    },
+    {
+      "id": "title_royal_flush_club",
+      "name": "Royal Flush Club",
+      "category": "playerTitle",
+      "rarity": "legendary",
+      "previewAssetName": "cosmetic_playerTitle_royal_flush_club",
+      "unlockCondition": "achievement"
+    },
+    {
+      "id": "title_bluff_master",
+      "name": "Bluff Master",
+      "category": "playerTitle",
+      "rarity": "rare",
+      "previewAssetName": "cosmetic_playerTitle_bluff_master",
+      "unlockCondition": "achievement"
+    },
+    {
+      "id": "title_all_in_maniac",
+      "name": "All-In Maniac",
+      "category": "playerTitle",
+      "rarity": "rare",
+      "previewAssetName": "cosmetic_playerTitle_all_in_maniac",
+      "unlockCondition": "achievement"
+    },
+    {
+      "id": "title_comeback_king",
+      "name": "Comeback King",
+      "category": "playerTitle",
+      "rarity": "epic",
+      "previewAssetName": "cosmetic_playerTitle_comeback_king",
+      "unlockCondition": "achievement"
+    },
+    {
+      "id": "title_veteran",
+      "name": "Veteran",
+      "category": "playerTitle",
+      "rarity": "common",
+      "previewAssetName": "cosmetic_playerTitle_veteran",
+      "unlockCondition": "achievement"
+    },
+    {
+      "id": "title_sharp_shooter",
+      "name": "Sharp Shooter",
+      "category": "playerTitle",
+      "rarity": "rare",
+      "previewAssetName": "cosmetic_playerTitle_sharp_shooter",
+      "unlockCondition": "achievement"
+    },
+    {
+      "id": "title_the_whale",
+      "name": "The Whale",
+      "category": "playerTitle",
+      "rarity": "epic",
+      "previewAssetName": "cosmetic_playerTitle_the_whale",
+      "unlockCondition": "achievement"
+    },
+    {
+      "id": "title_lucky_seven",
+      "name": "Lucky Seven",
+      "category": "playerTitle",
+      "rarity": "rare",
+      "priceChips": 7777,
+      "previewAssetName": "cosmetic_playerTitle_lucky_seven",
+      "unlockCondition": "purchase"
+    },
+    {
+      "id": "title_big_slick",
+      "name": "Big Slick",
+      "category": "playerTitle",
+      "rarity": "rare",
+      "priceChips": 8500,
+      "previewAssetName": "cosmetic_playerTitle_big_slick",
+      "unlockCondition": "purchase"
+    }
+  ]
+}

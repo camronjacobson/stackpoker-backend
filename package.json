@@ -11,6 +11,7 @@
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio",
+    "seed:cosmetics": "ts-node prisma/seeds/cosmetics.ts",
     "test": "jest",
     "loadtest": "ts-node scripts/loadtest.ts"
   },
