@@ -1483,6 +1483,21 @@ export class PokerGameEngine {
 
     this.state.winners = winners;
     this.state.phase   = 'ENDED';
+    // Diagnostic for the split-pot Full-House-vs-Two-Pair report (2026-05-13).
+    // Backend repro of the exact reported cards (A♣K♣3♥2♣ vs 5♣8♦J♣J♥ on
+    // 6♥K♥K♠2♠Q♦) returned a sole winner correctly, so a real split being
+    // emitted would mean the live hole cards or board differed from the
+    // screenshot. Logging the authoritative winners structure here makes the
+    // next occurrence either match the screenshot (real backend bug) or
+    // contradict it (iOS rendering bug). Remove once the report is closed.
+    logger.info(`Hand #${this.state.handNumber} showdown winners: ${JSON.stringify(winners.map(w => ({
+      playerId:  w.playerId,
+      handName:  w.handName,
+      amount:    w.amount,
+      bestCards: w.bestCards.map(c => `${c.rank}${c.suit}`),
+    })))} | board: ${this.state.communityCards.map(c => `${c.rank}${c.suit}`).join(',')} | holes: ${JSON.stringify(this.state.seats
+      .filter(s => s.status === 'ACTIVE' || s.status === 'ALL_IN')
+      .map(s => ({ userId: s.userId, cards: s.holeCards.map(c => `${c.rank}${c.suit}`) })))}`);
     this.emit();
     this.onHandEnd(this.state);
 
