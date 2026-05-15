@@ -48,12 +48,16 @@ export async function claimDailyBonus(userId: string) {
     ? DAILY_BONUS + LOW_CHIP_BONUS
     : DAILY_BONUS;
 
-  await prisma.$transaction([
-    prisma.user.update({
+  // Callback-form $transaction so we can re-read the post-mutation balance
+  // inside the transaction. The returned newBalance is the source of truth
+  // for the iOS HUD — see TECH_DEBT.md "per-endpoint newBalance" entry.
+  const newBalance = await prisma.$transaction(async (tx) => {
+    const updated = await tx.user.update({
       where: { id: userId },
       data: { chipBalance: { increment: bonus } },
-    }),
-    prisma.chipTransaction.create({
+      select: { chipBalance: true },
+    });
+    await tx.chipTransaction.create({
       data: {
         recipientId: userId,
         amount: bonus,
@@ -62,11 +66,16 @@ export async function claimDailyBonus(userId: string) {
           ? 'Daily bonus + low chip rescue!'
           : 'Daily login bonus',
       },
-    }),
-  ]);
+    });
+    return updated.chipBalance;
+  });
 
   logger.info(`Daily bonus claimed: ${userId} received ${bonus}`);
-  return { bonusAmount: bonus.toString(), message: 'Chips added to your balance!' };
+  return {
+    bonusAmount: bonus.toString(),
+    newBalance:  newBalance.toString(),
+    message:     'Chips added to your balance!',
+  };
 }
 
 // ─── Transfer chips ───────────────────────────────────────────────────────────
@@ -93,16 +102,22 @@ export async function transferChips(
     throw { code: 'INSUFFICIENT_CHIPS', message: 'Not enough chips' };
   }
 
-  await prisma.$transaction([
-    prisma.user.update({
+  // Callback-form $transaction so we can re-read the sender's post-mutation
+  // balance inside the transaction. `newBalance` is the sender's wallet
+  // value after the debit — the iOS HUD belongs to the sender so we never
+  // surface the recipient's balance here. (Recipient's HUD goes stale until
+  // their next /auth/me; see TECH_DEBT.md "socket-pushed balance_updated".)
+  const newBalance = await prisma.$transaction(async (tx) => {
+    const updatedSender = await tx.user.update({
       where: { id: senderId },
       data: { chipBalance: { decrement: BigInt(amount) } },
-    }),
-    prisma.user.update({
+      select: { chipBalance: true },
+    });
+    await tx.user.update({
       where: { id: recipientId },
       data: { chipBalance: { increment: BigInt(amount) } },
-    }),
-    prisma.chipTransaction.create({
+    });
+    await tx.chipTransaction.create({
       data: {
         senderId,
         recipientId,
@@ -110,11 +125,16 @@ export async function transferChips(
         type: 'TRANSFER_SENT',
         description: note?.slice(0, 100) || `Transfer to ${recipient.username}`,
       },
-    }),
-  ]);
+    });
+    return updatedSender.chipBalance;
+  });
 
   logger.info(`Chip transfer: ${senderId} -> ${recipientId}, amount: ${amount}`);
-  return { transferred: amount, recipient: recipient.username };
+  return {
+    transferred: amount,
+    recipient:   recipient.username,
+    newBalance:  newBalance.toString(),
+  };
 }
 
 // ─── Chip history ─────────────────────────────────────────────────────────────

@@ -94,7 +94,9 @@ function markTableActive(tableId: string) {
   lastHumanActivityAt.set(tableId, Date.now());
 }
 
-async function forceCloseIdleTable(io: SocketServer, tableId: string): Promise<void> {
+// Exported for tests (balanceMutations.test.ts). Not part of the public API
+// surface — the only production caller is the idle-table sweeper below.
+export async function forceCloseIdleTable(io: SocketServer, tableId: string): Promise<void> {
   const sessions = await prisma.tableSession.findMany({
     where: { tableId, isActive: true },
   });
@@ -106,38 +108,52 @@ async function forceCloseIdleTable(io: SocketServer, tableId: string): Promise<v
       data: { status: 'CLOSED', closedAt: now },
     }),
   ];
+  // Track which users we credited so we can emit your_chips_updated to each
+  // of them after the transaction commits — they may still have an active
+  // socket (e.g. lobby view) that needs to refresh its HUD without a relaunch.
+  // Map: userId → post-credit chipBalance (string).
+  const creditedBalances = new Map<string, string>();
+
   if (sessions.length > 0) {
-    ops.push(
-      prisma.tableSession.updateMany({
+    await prisma.$transaction(async (tx) => {
+      await tx.pokerTable.update({
+        where: { id: tableId },
+        data: { status: 'CLOSED', closedAt: now },
+      });
+      await tx.tableSession.updateMany({
         where: { tableId, isActive: true },
         data: { isActive: false, leftAt: now },
-      })
-    );
-    for (const s of sessions) {
-      // Skip the credit for sessions that already had chips returned via
-      // softLeaveCashOut — re-incrementing here would double-pay. The
-      // CASH_OUT transaction was written at soft-leave time.
-      if (s.chipsReturned) continue;
-      ops.push(
-        prisma.user.update({
+      });
+      for (const s of sessions) {
+        // Skip the credit for sessions that already had chips returned via
+        // softLeaveCashOut — re-incrementing here would double-pay. The
+        // CASH_OUT transaction was written at soft-leave time.
+        if (s.chipsReturned) continue;
+        const u = await tx.user.update({
           where: { id: s.userId },
           data: { chipBalance: { increment: s.currentStack } },
-        })
-      );
-      ops.push(
-        prisma.chipTransaction.create({
+          select: { chipBalance: true },
+        });
+        await tx.chipTransaction.create({
           data: {
-            recipientId:  s.userId,
-            amount:       s.currentStack,
-            type:         'CASH_OUT',
+            recipientId: s.userId,
+            amount: s.currentStack,
+            type: 'CASH_OUT',
             tableId,
-            description:  'Auto cash-out (idle table)',
+            description: 'Auto cash-out (idle table)',
           },
-        })
-      );
-    }
+        });
+        creditedBalances.set(s.userId, u.chipBalance.toString());
+      }
+    });
+  } else {
+    // No active sessions — just flip the table to CLOSED. Single update is
+    // cheaper than the txn callback for the common empty-table case.
+    await prisma.pokerTable.update({
+      where: { id: tableId },
+      data: { status: 'CLOSED', closedAt: now },
+    });
   }
-  await prisma.$transaction(ops);
 
   // Drop the in-memory engine for this table. Any DB-side disconnect
   // stamps will become moot since the transaction above already flipped
@@ -151,6 +167,13 @@ async function forceCloseIdleTable(io: SocketServer, tableId: string): Promise<v
     data: { tableId, reason: 'idle' },
     ts: Date.now(),
   });
+
+  // Per-user balance updates: hit the userRoom for every refunded session.
+  // Backgrounded apps with an open socket will still receive these; cold-
+  // start clients will pick up the right balance from /auth/me on next launch.
+  for (const [userId, newBalance] of creditedBalances) {
+    emitChipsUpdated(io, userId, newBalance, 'idle_table_closed');
+  }
 }
 
 // Find sessions stamped with `disconnectedAt` older than the grace window
@@ -254,6 +277,30 @@ function emit<T>(socket: Socket, event: string, data: T) {
   socket.emit(event, { event, data, ts: Date.now() });
 }
 
+// ─── your_chips_updated emit helper ─────────────────────────────────────────
+// Canonical socket-side mechanism for telling a user that their wallet
+// balance has changed (parallel to the REST `newBalance` response field).
+// Targets the user's personal room (userRoom) so every device of that user
+// receives the update — table-scoped emits would miss tabs/sessions not at
+// the table that triggered the change. `reason` is a short tag for
+// debugging/telemetry; iOS doesn't branch on it today.
+//
+// See TECH_DEBT.md ("Balance sync via socket"). Any future server-side chip
+// mutation that isn't tied to an HTTP response should emit through here
+// rather than inventing a new event name.
+function emitChipsUpdated(
+  io: SocketServer,
+  userId: string,
+  newBalance: string,
+  reason: string,
+) {
+  io.to(userRoom(userId)).emit('your_chips_updated', {
+    event: 'your_chips_updated',
+    data: { newBalance, reason },
+    ts: Date.now(),
+  });
+}
+
 async function broadcastGameState(io: SocketServer, tableId: string) {
   const sockets = await io.in(tableRoom(tableId)).fetchSockets();
   for (const sock of sockets) {
@@ -303,7 +350,11 @@ export function registerSocketHandlers(io: SocketServer): void {
         // INSUFFICIENT_CHIPS if the user spent the cashed-out chips
         // elsewhere; we surface that as a normal error event.
         try {
-          await lobbyService.rejoinRedebit(userId, tableId);
+          const r = await lobbyService.rejoinRedebit(userId, tableId);
+          // CHIP MUTATION: server returned newBalance; sync HUD via socket.
+          // Emit even on the didDebit=false no-op path so any HUD that drifted
+          // from another mutation source gets refreshed on rejoin.
+          emitChipsUpdated(io, userId, r.newBalance, r.didDebit ? 'rejoin_redebit' : 'rejoin_noop');
         } catch (err: any) {
           if (err?.code === 'INSUFFICIENT_CHIPS') {
             emit(socket, 'error', { code: err.code, message: err.message });
@@ -462,7 +513,12 @@ export function registerSocketHandlers(io: SocketServer): void {
         // `chipsReturned=true` and skips the credit so chips are never
         // paid twice.
         try {
-          await lobbyService.softLeaveCashOut(userId, tableId);
+          const r = await lobbyService.softLeaveCashOut(userId, tableId);
+          // CHIP MUTATION: server returned newBalance; sync HUD via socket.
+          // This is the bug-class the user originally reported — leaving a
+          // table credited chips back to the wallet but the in-session HUD
+          // didn't notice.
+          emitChipsUpdated(io, userId, r.newBalance, 'cash_out');
         } catch (err: any) {
           if (err?.code === 'GAME_IN_PROGRESS') {
             // Engine already removed the seat above; the hand-end cleanup

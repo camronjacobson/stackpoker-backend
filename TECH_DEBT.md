@@ -1,0 +1,117 @@
+# StackPoker — Tech Debt Log
+
+## Balance sync via socket: `your_chips_updated`
+
+**Recorded:** 2026-05-15 (initial), 2026-05-15 (socket event added)
+
+The `your_chips_updated` socket event is now the **canonical mechanism** for
+in-session balance changes that don't come back through an HTTP response.
+REST mutations still use the response-level `newBalance` field (8 iOS call
+sites, listed below). Both feed the same `AuthViewModel.applyServerBalance`
+function, so iOS has one balance-update code path.
+
+### Current emit sources (server → client)
+
+| Source                                   | Reason tag              | Notes |
+| ---------------------------------------- | ----------------------- | ----- |
+| `softLeaveCashOut` (leave_table socket)  | `cash_out`              | The user-reported bug class — credits chips back when leaving a table. |
+| `rejoinRedebit` (join_table socket)      | `rejoin_redebit`        | Re-debits the wallet when reconnecting to a soft-left seat. |
+| `rejoinRedebit` (no-op branch)           | `rejoin_noop`           | No mutation happened, but we still emit so any stale HUD refreshes on rejoin. |
+| `forceCloseIdleTable` (sweeper)          | `idle_table_closed`     | Per-user emit; refunds every active session's stack. |
+
+### Future emit sources (must use this event, not invent new ones)
+
+- **Admin grant** — emit to the *recipient*'s userRoom from the admin endpoint.
+- **Friend tipping** — emit to the recipient's userRoom (sender already gets `newBalance` via HTTP response).
+- **Tournament prizes** — emit per winner when results settle.
+- **Hand-settlement → wallet flow**, if we ever move chip credits out of seat.stack into chipBalance during play (today they only move on leave).
+
+### Future unification (long-term)
+
+Route REST mutations through the same socket event so iOS can drop the
+response-level `newBalance` field entirely and rely on a single subscription
+point. Tactical today (HTTP responses are still authoritative for the caller's
+own action latency), strategic later when the surface area gets too wide to
+keep both in sync.
+
+### iOS wiring
+
+- Subscription: `StackPokerApp.swift` → `authViewModel.bindToSocketChipUpdates(GameSocketClient.shared)` (one subscription, app lifetime).
+- Handler: `AuthViewModel.bindToSocketChipUpdates(_:)` routes every event to `applyServerBalance(_:)` regardless of `reason`. Grep marker: `// CHIP MUTATION: server returned newBalance; sync HUD.`
+- Payload type: `ChipsUpdatedEvent { newBalance: String, reason: String? }` in `Features/Game/Models/GameModels.swift`.
+
+---
+
+## Chip balance: per-endpoint `newBalance` vs. socket-pushed `balance_updated`
+
+**Recorded:** 2026-05-15
+
+### Current (tactical) approach
+
+Every chip-mutating HTTP endpoint returns a top-level `newBalance: string`
+(BigInt-as-string) in its response body. The iOS HUD calls
+`AuthViewModel.applyServerBalance(_:)` with that value immediately after each
+successful response.
+
+Endpoints that follow this convention:
+
+| Endpoint                                          | Mutation                          | Whose balance is in `newBalance` |
+| ------------------------------------------------- | --------------------------------- | -------------------------------- |
+| `POST /chips/daily-bonus`                         | credit caller                     | caller                           |
+| `POST /chips/transfer`                            | debit sender, credit recipient    | **sender only** — recipient stays stale |
+| `POST /cosmetics/purchase`                        | debit caller                      | caller                           |
+| `POST /tables/join/:code` (+ direct join)         | debit caller (buy-in)             | caller                           |
+| `POST /tables/:id/leave`                          | credit caller (chips returned)    | caller                           |
+| `POST /tables/:id/topup`                          | debit caller (top-up)             | caller                           |
+
+iOS side: every call site has a `// CHIP MUTATION: server returned newBalance; sync HUD.`
+comment above the `applyServerBalance` call so the pattern is grep-able.
+
+### Known gaps under the current approach
+
+1. **Transfer recipient HUD goes stale.** The receiving user's `chipBalance`
+   changes on the server but their app doesn't know until the next `/auth/me`
+   (app foreground, pull-to-refresh, etc.).
+
+2. **Admin grant is silent.** `POST /admin/grant-chips` mutates a *third* user's
+   balance. There is no response field that could update the target's HUD over
+   HTTP. The admin's own response could include the grantee's new balance, but
+   that doesn't help the grantee's device.
+
+3. **Socket-driven balance changes are silent.** The following server-side
+   mutations happen *outside* a request/response cycle (driven by game state
+   transitions or socket events) and currently emit nothing balance-related to
+   the affected user:
+   - `softLeaveCashOut` (auto-cashout when a player disconnects past the grace
+     window or sits out for too long)
+   - `rejoinRedebit` (re-buy on rejoin if their seat was cleared)
+   - Hand settlement credits/debits inside the engine
+   The socket emits we already send (`game_state`, `hand_ended`, `player_left`,
+   `table_closed`, etc.) carry seat-stack data but NOT wallet balance.
+
+### Long-term direction
+
+**Partially landed 2026-05-15** — the dedicated socket event now exists as
+`your_chips_updated` (see the top section of this file). It covers the three
+socket-driven gaps below (softLeaveCashOut / rejoinRedebit / idle sweep). The
+remaining gaps (transfer recipient, admin grant) still need to start emitting
+through the same event before this section can be considered fully closed.
+
+Once every wallet mutation point emits `your_chips_updated`, the per-endpoint
+HTTP `newBalance` field becomes redundant for *reachable* users — but we
+should keep it for HTTP-flow latency reasons (UI shouldn't wait for a socket
+round-trip after a button press) and because the HTTP response is the ground
+truth for the caller's own action.
+
+### When to escalate
+
+Promote this from "tactical OK" to "fix now" when **any** of the following
+ship:
+- A feature that depends on the recipient seeing transfers in real time
+  (e.g. friend-to-friend tipping with a UX expectation of instant feedback).
+- A live-stream / table-spectator mode where third parties watch balance
+  movement.
+- Anti-fraud tooling that requires an authoritative client-side balance feed.
+
+Until then the tactical approach holds: server-authoritative, response-driven,
+HUD updates one runloop tick after the action.

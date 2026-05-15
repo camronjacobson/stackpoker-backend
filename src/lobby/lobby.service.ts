@@ -165,7 +165,7 @@ export async function joinTableByCode(
   userId: string,
   joinCode: string,
   data: JoinTableRequest
-): Promise<TableDetail> {
+): Promise<TableDetail & { newBalance: string }> {
   const table = await prisma.pokerTable.findUnique({
     where: { joinCode },
     include: {
@@ -195,7 +195,7 @@ export async function joinTable(
   userId: string,
   tableId: string,
   data: JoinTableRequest
-): Promise<TableDetail> {
+): Promise<TableDetail & { newBalance: string }> {
   const { buyInAmount, seatIndex } = data;
 
   const table = await prisma.pokerTable.findUnique({
@@ -215,7 +215,15 @@ export async function joinTable(
   // navigate into the game where `join_table` over the websocket reconciles.
   const existingSession = table.sessions.find(s => s.userId === userId);
   if (existingSession) {
-    return getTableDetail(tableId, userId);
+    // Rejoin no-op — balance didn't change, but we still return it so the
+    // iOS client can do a single applyServerBalance at the call site without
+    // branching on whether the join was a real join or a rejoin.
+    const detail = await getTableDetail(tableId, userId);
+    const u = await prisma.user.findUnique({
+      where:  { id: userId },
+      select: { chipBalance: true },
+    });
+    return { ...detail, newBalance: (u?.chipBalance ?? 0n).toString() };
   }
 
   // Validate buy-in
@@ -250,12 +258,15 @@ export async function joinTable(
     throw { code: 'INSUFFICIENT_CHIPS', message: 'Not enough chips for this buy-in' };
   }
 
-  await prisma.$transaction([
-    prisma.user.update({
+  // Callback-form $transaction so we can read the post-debit balance inside
+  // the txn and return it as newBalance — the iOS HUD source of truth.
+  const newBalance = await prisma.$transaction(async (tx) => {
+    const updated = await tx.user.update({
       where: { id: userId },
-      data: { chipBalance: { decrement: BigInt(buyInAmount) } },
-    }),
-    prisma.tableSession.create({
+      data:  { chipBalance: { decrement: BigInt(buyInAmount) } },
+      select: { chipBalance: true },
+    });
+    await tx.tableSession.create({
       data: {
         tableId,
         userId,
@@ -264,8 +275,8 @@ export async function joinTable(
         currentStack: BigInt(buyInAmount),
         isActive: true,
       },
-    }),
-    prisma.chipTransaction.create({
+    });
+    await tx.chipTransaction.create({
       data: {
         recipientId: userId,
         amount: BigInt(-buyInAmount),
@@ -273,16 +284,21 @@ export async function joinTable(
         tableId,
         description: `Buy-in to table "${table.name}"`,
       },
-    }),
-  ]);
+    });
+    return updated.chipBalance;
+  });
 
   logger.info(`User ${userId} joined table ${tableId} with ${buyInAmount} chips at seat ${seat}`);
-  return getTableDetail(tableId, userId);
+  const detail = await getTableDetail(tableId, userId);
+  return { ...detail, newBalance: newBalance.toString() };
 }
 
 // ─── Leave Table ──────────────────────────────────────────────────────────────
 
-export async function leaveTable(userId: string, tableId: string): Promise<{ chipsReturned: string }> {
+export async function leaveTable(
+  userId: string,
+  tableId: string,
+): Promise<{ chipsReturned: string; newBalance: string }> {
   const session = await prisma.tableSession.findUnique({
     where: { tableId_userId: { tableId, userId } },
   });
@@ -298,23 +314,22 @@ export async function leaveTable(userId: string, tableId: string): Promise<{ chi
 
   const stack = session.currentStack;
 
-  // If chips were already credited via softLeaveCashOut, just close the
-  // session — re-incrementing chipBalance here would double-pay. The
-  // CASH_OUT transaction was already written at soft-leave time, so the
-  // user's transaction log already shows the cash-out.
-  const ops: any[] = [
-    prisma.tableSession.update({
+  // Callback-form $transaction so we can read the post-mutation balance.
+  // Both branches re-read inside the txn so the returned newBalance reflects
+  // the committed state — including the no-op `session.chipsReturned` case
+  // where the user's wallet wasn't touched here (chips were credited at the
+  // soft-leave earlier).
+  const newBalance = await prisma.$transaction(async (tx) => {
+    await tx.tableSession.update({
       where: { id: session.id },
       data: { isActive: false, leftAt: new Date(), chipsReturned: false },
-    }),
-  ];
-  if (!session.chipsReturned) {
-    ops.push(
-      prisma.user.update({
+    });
+    if (!session.chipsReturned) {
+      await tx.user.update({
         where: { id: userId },
         data: { chipBalance: { increment: stack } },
-      }),
-      prisma.chipTransaction.create({
+      });
+      await tx.chipTransaction.create({
         data: {
           recipientId: userId,
           amount: stack,
@@ -322,10 +337,14 @@ export async function leaveTable(userId: string, tableId: string): Promise<{ chi
           tableId,
           description: `Cash out from table`,
         },
-      }),
-    );
-  }
-  await prisma.$transaction(ops);
+      });
+    }
+    const u = await tx.user.findUnique({
+      where:  { id: userId },
+      select: { chipBalance: true },
+    });
+    return u?.chipBalance ?? 0n;
+  });
 
   // Close table if owner left and no other players
   const remaining = await prisma.tableSession.count({
@@ -340,7 +359,10 @@ export async function leaveTable(userId: string, tableId: string): Promise<{ chi
 
   const returned = session.chipsReturned ? 0n : stack;
   logger.info(`User ${userId} left table ${tableId}, returned ${returned} chips (already-credited=${session.chipsReturned})`);
-  return { chipsReturned: returned.toString() };
+  return {
+    chipsReturned: returned.toString(),
+    newBalance:    newBalance.toString(),
+  };
 }
 
 // ─── Soft-leave cash-out (Option C) ──────────────────────────────────────────
@@ -352,7 +374,10 @@ export async function leaveTable(userId: string, tableId: string): Promise<{ chi
 // reseat the user at the same stack. If the user doesn't come back, the
 // sweeper calls leaveTable above which sees chipsReturned=true and skips
 // the credit so chips are never paid twice.
-export async function softLeaveCashOut(userId: string, tableId: string): Promise<{ chipsReturned: string }> {
+export async function softLeaveCashOut(
+  userId: string,
+  tableId: string,
+): Promise<{ chipsReturned: string; newBalance: string }> {
   const session = await prisma.tableSession.findUnique({
     where: { tableId_userId: { tableId, userId } },
   });
@@ -360,12 +385,21 @@ export async function softLeaveCashOut(userId: string, tableId: string): Promise
     throw { code: 'NOT_AT_TABLE', message: 'You are not at this table' };
   }
   // Already cashed-out and waiting for rejoin — just refresh the timer.
+  // No chip movement happens here, but we still report the current wallet
+  // balance so callers (including the socket emit path) can sync any HUD
+  // that may have gone stale via a different code path.
   if (session.chipsReturned) {
-    await prisma.tableSession.update({
-      where: { id: session.id },
-      data: { disconnectedAt: new Date() },
+    const updated = await prisma.$transaction(async (tx) => {
+      await tx.tableSession.update({
+        where: { id: session.id },
+        data: { disconnectedAt: new Date() },
+      });
+      return tx.user.findUnique({
+        where: { id: userId },
+        select: { chipBalance: true },
+      });
     });
-    return { chipsReturned: '0' };
+    return { chipsReturned: '0', newBalance: (updated?.chipBalance ?? 0n).toString() };
   }
   const table = await prisma.pokerTable.findUnique({ where: { id: tableId } });
   if (table?.status === 'IN_PROGRESS') {
@@ -373,16 +407,20 @@ export async function softLeaveCashOut(userId: string, tableId: string): Promise
   }
 
   const stack = session.currentStack;
-  await prisma.$transaction([
-    prisma.tableSession.update({
+  // Callback-form txn so we can read the post-credit balance from the same
+  // transaction that performs the credit — see TECH_DEBT.md for the
+  // newBalance convention.
+  const post = await prisma.$transaction(async (tx) => {
+    await tx.tableSession.update({
       where: { id: session.id },
       data: { chipsReturned: true, disconnectedAt: new Date() },
-    }),
-    prisma.user.update({
+    });
+    const u = await tx.user.update({
       where: { id: userId },
       data: { chipBalance: { increment: stack } },
-    }),
-    prisma.chipTransaction.create({
+      select: { chipBalance: true },
+    });
+    await tx.chipTransaction.create({
       data: {
         recipientId: userId,
         amount: stack,
@@ -390,11 +428,12 @@ export async function softLeaveCashOut(userId: string, tableId: string): Promise
         tableId,
         description: `Cash out (rejoin pending)`,
       },
-    }),
-  ]);
+    });
+    return u;
+  });
 
   logger.info(`User ${userId} soft-left table ${tableId}, returned ${stack} chips (seat held for rejoin)`);
-  return { chipsReturned: stack.toString() };
+  return { chipsReturned: stack.toString(), newBalance: post.chipBalance.toString() };
 }
 
 // ─── Rejoin re-debit (Option C) ──────────────────────────────────────────────
@@ -403,11 +442,22 @@ export async function softLeaveCashOut(userId: string, tableId: string): Promise
 // soft-leave flags so the session is back to a normal active state with the
 // engine. Throws INSUFFICIENT_CHIPS if the user spent the cashed-out chips
 // elsewhere in the meantime.
-export async function rejoinRedebit(userId: string, tableId: string): Promise<void> {
+export async function rejoinRedebit(
+  userId: string,
+  tableId: string,
+): Promise<{ newBalance: string; didDebit: boolean }> {
   const session = await prisma.tableSession.findUnique({
     where: { tableId_userId: { tableId, userId } },
   });
-  if (!session || !session.isActive || !session.chipsReturned) return;
+  // No-op path: nothing to re-debit, but still report current balance so
+  // the socket emit can refresh any HUD that may be stale from another path.
+  if (!session || !session.isActive || !session.chipsReturned) {
+    const u = await prisma.user.findUnique({
+      where: { id: userId },
+      select: { chipBalance: true },
+    });
+    return { newBalance: (u?.chipBalance ?? 0n).toString(), didDebit: false };
+  }
 
   const user = await prisma.user.findUnique({ where: { id: userId } });
   const stack = session.currentStack;
@@ -418,16 +468,19 @@ export async function rejoinRedebit(userId: string, tableId: string): Promise<vo
     };
   }
 
-  await prisma.$transaction([
-    prisma.tableSession.update({
+  // Callback-form txn so newBalance is read from the same transaction that
+  // performs the debit. See TECH_DEBT.md.
+  const post = await prisma.$transaction(async (tx) => {
+    await tx.tableSession.update({
       where: { id: session.id },
       data: { chipsReturned: false, disconnectedAt: null },
-    }),
-    prisma.user.update({
+    });
+    const u = await tx.user.update({
       where: { id: userId },
       data: { chipBalance: { decrement: stack } },
-    }),
-    prisma.chipTransaction.create({
+      select: { chipBalance: true },
+    });
+    await tx.chipTransaction.create({
       data: {
         // Match the existing buy-in convention: recipient=user, negative
         // amount denotes chips leaving the wallet to the table.
@@ -437,10 +490,12 @@ export async function rejoinRedebit(userId: string, tableId: string): Promise<vo
         tableId,
         description: `Rejoin reseat`,
       },
-    }),
-  ]);
+    });
+    return u;
+  });
 
   logger.info(`User ${userId} rejoined table ${tableId}, re-debited ${stack} chips`);
+  return { newBalance: post.chipBalance.toString(), didDebit: true };
 }
 
 // ─── Top Up Chips (mid-table rebuy) ───────────────────────────────────────────
@@ -471,7 +526,7 @@ export async function topUpChips(
   tableId: string,
   amount: number,
   mode: TopUpMode = 'apply'
-): Promise<{ newStack: string; addedAmount: string; pending: boolean }> {
+): Promise<{ newStack: string; addedAmount: string; pending: boolean; newBalance: string }> {
   if (!Number.isInteger(amount) || amount <= 0) {
     throw { code: 'INVALID_AMOUNT', message: 'Top-up amount must be a positive integer' };
   }
@@ -510,12 +565,22 @@ export async function topUpChips(
 
   // Common DB writes: debit user, record transaction. The session stack
   // update is the discriminator — only the 'apply' path writes it now.
-  const writes: any[] = [
-    prisma.user.update({
+  //
+  // Callback-form $transaction so we can read the post-debit balance inside
+  // the txn and return it as newBalance — the iOS HUD source of truth.
+  const newBalance = await prisma.$transaction(async (tx) => {
+    const updated = await tx.user.update({
       where: { id: userId },
-      data: { chipBalance: { decrement: BigInt(amount) } },
-    }),
-    prisma.chipTransaction.create({
+      data:  { chipBalance: { decrement: BigInt(amount) } },
+      select: { chipBalance: true },
+    });
+    if (mode === 'apply') {
+      await tx.tableSession.update({
+        where: { id: session.id },
+        data:  { currentStack: projectedStack },
+      });
+    }
+    await tx.chipTransaction.create({
       data: {
         recipientId: userId,
         amount:      BigInt(-amount),
@@ -525,15 +590,9 @@ export async function topUpChips(
           ? `Pending top-up at table "${table.name}" (applies at hand end)`
           : `Top-up at table "${table.name}"`,
       },
-    }),
-  ];
-  if (mode === 'apply') {
-    writes.splice(1, 0, prisma.tableSession.update({
-      where: { id: session.id },
-      data: { currentStack: projectedStack },
-    }));
-  }
-  await prisma.$transaction(writes);
+    });
+    return updated.chipBalance;
+  });
 
   logger.info(
     `User ${userId} ${mode === 'queue' ? 'queued mid-hand' : 'topped up'} ${amount} chips ` +
@@ -546,6 +605,7 @@ export async function topUpChips(
     newStack:    projectedStack.toString(),
     addedAmount: String(amount),
     pending:     mode === 'queue',
+    newBalance:  newBalance.toString(),
   };
 }
 
