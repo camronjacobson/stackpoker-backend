@@ -2,6 +2,7 @@ import { PokerGameEngine } from './gameEngine';
 import { ServerGameState, WinnerPayout } from './gameState.types';
 import { PrismaClient } from '@prisma/client';
 import { logger } from '../shared/utils';
+import { isBotUsername } from './botService';
 
 const prisma = new PrismaClient();
 
@@ -50,7 +51,7 @@ class GameRoomManager {
       // Tag bot seats so the engine auto-acts on their turn. Without this,
       // after a server restart the bot seat loses its isBot flag and only
       // moves via the 30-second disconnect auto-fold.
-      isBot:       s.user.username === 'StackBot',
+      isBot:       isBotUsername(s.user.username),
     }));
 
     const engine = new PokerGameEngine(

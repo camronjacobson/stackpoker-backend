@@ -166,10 +166,11 @@ lobbyRouter.post('/:id/topup',
           // call already ran with too few eligible seats and the socket
           // join_table flow won't re-fire without a reconnect. Without this
           // kick, a heads-up vs. StackBot table deadlocks at the "Invite
-          // friends" empty state forever after a bust + rebuy. Match the
-          // 1500ms delay used elsewhere (socket join_table, bot session
-          // start) so the iOS chip-arrival animation has a moment to land
-          // before the new hand's deal animation starts on top of it.
+          // friends" empty state forever after a bust + rebuy when only a
+          // bot remains. Match the 1500ms delay used elsewhere (socket
+          // join_table, bot session start) so the iOS chip-arrival
+          // animation has a moment to land before the new hand's deal
+          // animation starts on top of it.
           if (engine.canStartHand()) setTimeout(() => engine.startHand(), 1500);
         }
       }

@@ -3,6 +3,7 @@ import { param, validationResult } from 'express-validator';
 import { PrismaClient } from '@prisma/client';
 import { requireAuth } from '../shared/middleware/auth.middleware';
 import { sendSuccess, sendError, sendServerError } from '../shared/utils';
+import { isBotUsername } from '../game/botService';
 
 // ─── Users router ─────────────────────────────────────────────────────────────
 // Lightweight per-user endpoints used by the in-game opponent popup. Anything
@@ -49,13 +50,13 @@ usersRouter.get('/:id/quick-profile',
         },
       });
 
-      // StackBot is the only AI account on the server (see botService.ts —
-      // BOT_USERNAME = 'StackBot'). VPIP/handsPlayed are never written for
-      // bot users, which means the popup was rendering "0%" with "0 hands"
-      // for every bot tap and the player rightly read that as a glitch.
-      // Surface an `isBot` flag so the client can swap the stat row for an
-      // "AI Opponent — stats not tracked" line instead of a meaningless 0%.
-      const isBot = user?.username === 'StackBot';
+      // Bot accounts (see botService.ts — BOT_PROFILES) never have
+      // VPIP/handsPlayed written for them, which means the popup was
+      // rendering "0%" with "0 hands" for every bot tap and the player
+      // rightly read that as a glitch. Surface an `isBot` flag so the
+      // client can swap the stat row for an "AI Opponent — stats not
+      // tracked" line instead of a meaningless 0%.
+      const isBot = isBotUsername(user?.username ?? '');
 
       if (!user) return sendError(res, 'NOT_FOUND', 'User not found', 404);
 

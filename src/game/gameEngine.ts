@@ -6,6 +6,7 @@ import {
   ActionType, LastAction, LegalAction, ClientSeat, WinnerPayout,
 } from './gameState.types';
 import { logger } from '../shared/utils';
+import { hashStringToInt } from './botService';
 
 // MAP: gameEngine — authoritative poker state machine (1108 lines)
 // - PokerGameEngine class .................. L20
@@ -776,7 +777,7 @@ export class PokerGameEngine {
     seat.mucked = seat.holeCards;
     seat.holeCards = [];
 
-    // Bot auto-show: when StackBot folds, reveal its full mucked hand the
+    // Bot auto-show: when a bot folds, reveal its full mucked hand the
     // same way a human can tap "show cards". Lets the table see what the bot
     // laid down and exercises the reveal animation in the empty-room dev
     // flow. `voluntaryShownCardIndices` is what `buildClientView` reads to
@@ -1115,9 +1116,16 @@ export class PokerGameEngine {
     this.extensionUsedThisTurn.clear();
     this.startTurnTimer(seat);
 
-    // Auto-act for bot players after a short "thinking" delay
+    // Auto-act for bot players after a short "thinking" delay.
+    // At a multi-bot table, identical Math.random() distributions would
+    // sometimes cluster two bots' actions into the same ~150ms window
+    // (visually they'd "double-act"). The per-bot hashed offset (0–599ms,
+    // stable by userId) staggers them deterministically without dropping
+    // the base randomness — humans still see varied think times.
     if (seat.isBot) {
-      const delay = 1200 + Math.random() * 1800; // 1.2–3s
+      const baseDelay    = 1200 + Math.random() * 1800; // 1.2–3s
+      const perBotOffset = hashStringToInt(seat.userId) % 600;
+      const delay        = baseDelay + perBotOffset;
       setTimeout(() => this.processBotAction(seat.userId), delay);
     }
   }

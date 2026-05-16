@@ -6,6 +6,7 @@ import { roomManager } from './roomManager';
 import { logger } from '../shared/utils';
 import { PrismaClient } from '@prisma/client';
 import * as lobbyService from '../lobby/lobby.service';
+import { BOT_USERNAMES, isBotUsername } from './botService';
 
 // MAP: socket.handler — Socket.IO event routing for /game ns (382 lines)
 // - broadcastGameState (per-recipient view)  L164
@@ -234,7 +235,7 @@ async function sweepIdleTables(io: SocketServer): Promise<void> {
         where: {
           tableId:  t.id,
           isActive: true,
-          user: { username: { not: 'StackBot' } },
+          user: { username: { notIn: [...BOT_USERNAMES] } },
         },
       });
       if (humanActive > 0) {
@@ -397,7 +398,7 @@ export function registerSocketHandlers(io: SocketServer): void {
             // get a single +15s extension via request_time_extension.
             timeBank:    0,
             isConnected: false,
-            isBot:       session.user.username === 'StackBot',
+            isBot:       isBotUsername(session.user.username),
           });
         } else {
           // Seat still exists — typically means we left mid-hand and the
