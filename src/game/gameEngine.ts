@@ -777,16 +777,11 @@ export class PokerGameEngine {
     seat.mucked = seat.holeCards;
     seat.holeCards = [];
 
-    // Bot auto-show: when a bot folds, reveal its full mucked hand the
-    // same way a human can tap "show cards". Lets the table see what the bot
-    // laid down and exercises the reveal animation in the empty-room dev
-    // flow. `voluntaryShownCardIndices` is what `buildClientView` reads to
-    // build the `revealedCards` array; indices outside `mucked.length` are
-    // filtered there, so passing 0..n-1 is safe for both Holdem (2) and PLO
-    // (4) without per-game branching.
-    if (seat.isBot) {
-      seat.voluntaryShownCardIndices = seat.mucked.map((_, i) => i);
-    }
+    // Bot folded-hand reveal is deferred to `endHand` (see the bot-reveal
+    // pass there). Setting `voluntaryShownCardIndices` here would leak the
+    // folded bot's hole cards into every subsequent mid-hand broadcast —
+    // fine in 1v1 where a bot fold ends the hand immediately, but wrong
+    // at a multi-bot table where the hand continues with other contestants.
   }
 
   private checkPlayer(seat: Seat): void {
@@ -1411,6 +1406,25 @@ export class PokerGameEngine {
     this.clearTurnTimer();
     this.state.phase = 'SHOWDOWN';
     this.state.activePlayerId = null;
+
+    // Bot folded-hand reveal — runs once per hand, here at hand-end, instead
+    // of inside `foldPlayer` where it used to fire on the fold action itself.
+    // The old placement leaked mid-hand cards at multi-bot tables (a bot
+    // folding preflop with 3 other contestants still in the pot would expose
+    // its hole cards through the remaining streets). Doing it at hand-end
+    // keeps the 1v1 "bot folds → hand ends → cards revealed" UX intact
+    // (this block runs in the same emit as the winners payload, so the
+    // reveal is atomic with the BIFF! winner beat) while preserving fairness
+    // when the hand continues with other players.
+    //
+    // Humans are intentionally excluded: folded humans keep their privacy.
+    // Showdown reveal is a different path (winners[].showCards) and not
+    // affected by `voluntaryShownCardIndices`.
+    for (const s of this.state.seats) {
+      if (s.isBot && s.status === 'FOLDED' && s.mucked.length > 0) {
+        s.voluntaryShownCardIndices = s.mucked.map((_, i) => i);
+      }
+    }
 
     // Build final pots
     this.state.pots = buildPots(this.state.seats.map(s => ({

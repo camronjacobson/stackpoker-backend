@@ -198,11 +198,17 @@ describe('PokerGameEngine — PLO', () => {
 
   // ─── Bot fold-show in PLO ───────────────────────────────────────────────
 
-  test('PLO: bot fold reveals all 4 mucked cards via voluntaryShownCardIndices', () => {
-    // Build a 2-handed PLO engine where p1 is a bot. After p1 folds, the
-    // engine should auto-populate voluntaryShownCardIndices with [0,1,2,3]
-    // so the table can see the full 4-card mucked hand — the PLO analogue
-    // of the NLH bot show-2-on-fold behaviour.
+  test('PLO: bot folded hand stays hidden until hand-end, then reveals all 4 mucked cards', () => {
+    // Two-handed PLO with p1 a bot. Contract under test:
+    //   (a) On the fold action, the bot's `voluntaryShownCardIndices` is
+    //       empty — folded hole cards must NOT leak mid-hand.
+    //   (b) At hand-end (here: 1v1 fold → uncontested, so endHand fires
+    //       after CLOSE_ROUND_DELAY_MS once blind bets are zeroed for the
+    //       chips-to-pot animation), all 4 mucked cards become voluntarily
+    //       shown via the endHand bot-reveal pass.
+    // The mid-hand-leak guard is what protects multi-bot tables where a
+    // bot folding preflop must not expose its hand for the rest of the
+    // hand to the other contestants.
     const states: ServerGameState[] = [];
     const seats = [
       { seatIndex: 0, userId: 'bot1', username: 'StackBot', displayName: 'StackBot',
@@ -219,9 +225,8 @@ describe('PokerGameEngine — PLO', () => {
     engine.startHand();
 
     // Walk the action surface until the bot is active, then have it fold.
-    // HU preflop button assignment varies; the contract under test is
-    // "when a bot folds, all of its mucked cards become voluntarily shown",
-    // not "the bot is first to act".
+    // HU preflop button assignment varies; we just want the bot to be the
+    // one folding.
     let guard = 0;
     while (engine.getState().activePlayerId !== 'bot1' && guard < 5) {
       const active = engine.getState().activePlayerId!;
@@ -233,12 +238,23 @@ describe('PokerGameEngine — PLO', () => {
     const r = engine.processAction('bot1', 'FOLD');
     expect(r.ok).toBe(true);
 
-    // Drive client view via the underlying state — voluntaryShownCardIndices
-    // is the contract `buildClientView` reads to populate revealedCards.
-    const bot = engine.getState().seats.find(s => s.userId === 'bot1')!;
-    expect(bot.status).toBe('FOLDED');
-    expect(bot.mucked).toHaveLength(4);              // PLO mucked = 4
-    expect(bot.voluntaryShownCardIndices).toEqual([0, 1, 2, 3]); // all 4 shown
+    // (a) Mid-hand-leak guard: immediately after the fold, before the
+    // CLOSE_ROUND_DELAY timer fires `endHand`, the bot's cards must still
+    // be hidden. `voluntaryShownCardIndices` is the field `buildClientView`
+    // reads to populate `revealedCards`, so an empty array == cards stay
+    // face-down on every client.
+    const botMidHand = engine.getState().seats.find(s => s.userId === 'bot1')!;
+    expect(botMidHand.status).toBe('FOLDED');
+    expect(botMidHand.mucked).toHaveLength(4);
+    expect(botMidHand.voluntaryShownCardIndices).toEqual([]);
+
+    // (b) Drive the deferred `endHand` (HU fold → uncontested winner;
+    // blinds were posted so visible-bets path schedules endHand via
+    // setTimeout(CLOSE_ROUND_DELAY_MS)). After it runs, the bot-reveal
+    // loop inside endHand populates the indices.
+    jest.advanceTimersByTime(1000);
+    const botEnd = engine.getState().seats.find(s => s.userId === 'bot1')!;
+    expect(botEnd.voluntaryShownCardIndices).toEqual([0, 1, 2, 3]);
   });
 
   // ─── Chip conservation ──────────────────────────────────────────────────
