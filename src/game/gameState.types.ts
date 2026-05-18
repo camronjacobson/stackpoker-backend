@@ -64,6 +64,21 @@ export interface Seat {
   // hydration don't have to pass it — the engine initializers default it
   // to 0. Treat missing as 0.
   pendingTopUp?:  number;
+  // Server-authoritative cosmetic equips per category — hydrated at
+  // seat-add from EquippedCosmetic rows via getEquippedForUsers().
+  // Phase 4 slice populates only "cardBack"; structure is forward-
+  // compatible for "avatarFrame", "chipSet", "tableFelt", etc.
+  //
+  // Optional on this server-side shape so addPlayer / engine hydration
+  // call sites that haven't migrated yet still type-check. The wire
+  // shape (ClientSeat) flattens `undefined` → `{}` in buildClientView,
+  // so iOS always receives a present (possibly empty) object.
+  //
+  // NOT refreshed mid-session — a user who equips a new cosmetic while
+  // seated will not see their change broadcast to opponents until the
+  // next table-join. Mid-session equip broadcast is Phase 5 (tracked
+  // in TECH_DEBT.md).
+  equippedCosmetics?: { [category: string]: string };
 }
 
 // ─── Last Action (broadcast-safe) ────────────────────────────────────────────
@@ -177,6 +192,11 @@ export interface ClientSeat {
   // and label them as "Left" while the hand finishes — the seat is still
   // visually present until endHand removes it.
   pendingLeave?:  boolean;
+  // Server-authoritative cosmetic equips per category. Always present
+  // on the wire (defaults to {} when the user has nothing equipped) so
+  // iOS doesn't have to handle two empty states (`undefined` vs `{}`).
+  // Phase 4 slice populates only the "cardBack" key.
+  equippedCosmetics: { [category: string]: string };
   // Mirrors `Seat.pendingTopUp`. iOS renders a small "+N pending" badge on
   // the seat so the player and the table both see chips have been bought
   // but won't credit until the hand ends. 0 (or omitted) → render nothing.

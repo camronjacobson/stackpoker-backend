@@ -7,6 +7,7 @@ import { logger } from '../shared/utils';
 import { PrismaClient } from '@prisma/client';
 import * as lobbyService from '../lobby/lobby.service';
 import { BOT_USERNAMES, isBotUsername } from './botService';
+import { getEquippedForUsers } from '../cosmetics/cosmetics.service';
 
 // MAP: socket.handler — Socket.IO event routing for /game ns (382 lines)
 // - broadcastGameState (per-recipient view)  L164
@@ -386,6 +387,11 @@ export function registerSocketHandlers(io: SocketServer): void {
         // Re-add player to engine if they were removed (e.g. after leaving then rejoining)
         const hasSeat = engine.getState().seats.find((s: any) => s.userId === userId);
         if (!hasSeat) {
+          // Single-user equipped lookup — same helper as roomManager,
+          // called with a one-element list so we don't fork the code
+          // path. Read once on rejoin; mid-session equip changes don't
+          // refresh until the next rejoin (Phase 5 / TECH_DEBT).
+          const equippedByUser = await getEquippedForUsers([userId]);
           engine.addPlayer({
             seatIndex:   session.seatIndex,
             userId,
@@ -399,6 +405,7 @@ export function registerSocketHandlers(io: SocketServer): void {
             timeBank:    0,
             isConnected: false,
             isBot:       isBotUsername(session.user.username),
+            equippedCosmetics: equippedByUser.get(userId) ?? {},
           });
         } else {
           // Seat still exists — typically means we left mid-hand and the

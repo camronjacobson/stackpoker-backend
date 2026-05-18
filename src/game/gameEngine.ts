@@ -152,6 +152,10 @@ export class PokerGameEngine {
       isDealer: false, isSmallBlind: false, isBigBlind: false,
       lastActionAt: Date.now(),
       pendingTopUp: 0,
+      // Default to {} when caller didn't pass equippedCosmetics. Keeps
+      // the field non-undefined on the server-side Seat so buildClientView
+      // can blindly forward it.
+      equippedCosmetics: seat.equippedCosmetics ?? {},
     });
     this.emit();
   }
@@ -725,6 +729,11 @@ export class PokerGameEngine {
         pendingTopUp:     s.pendingTopUp && s.pendingTopUp > 0
                             ? s.pendingTopUp
                             : undefined,
+        // Cosmetic equips — always present on the wire (defaults to {}
+        // when the user has nothing equipped). Read once at table-join
+        // (roomManager / socket.handler rejoin); mid-session equip
+        // changes are deferred to the next rejoin (Phase 5).
+        equippedCosmetics: s.equippedCosmetics ?? {},
       };
     });
 

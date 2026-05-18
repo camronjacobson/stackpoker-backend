@@ -3,6 +3,7 @@ import { ServerGameState, WinnerPayout } from './gameState.types';
 import { PrismaClient } from '@prisma/client';
 import { logger } from '../shared/utils';
 import { isBotUsername } from './botService';
+import { getEquippedForUsers } from '../cosmetics/cosmetics.service';
 
 const prisma = new PrismaClient();
 
@@ -34,6 +35,16 @@ class GameRoomManager {
 
     if (!table) throw new Error(`Table ${tableId} not found`);
 
+    // Bulk-fetch equipped cosmetics for every seated user in one query.
+    // Cheaper than N findFirst calls; safe to await before engine boot
+    // since engine creation is on the table-join hot path but is gated
+    // by an in-memory check at the top of getOrCreate (so this only
+    // runs once per server-life-per-table). Bots have no equip rows →
+    // they're absent from the map → they render the default card back
+    // on iOS via the `?? {}` fallback below.
+    const userIds = table.sessions.map(s => s.userId);
+    const equippedByUser = await getEquippedForUsers(userIds);
+
     const seats = table.sessions.map(s => ({
       seatIndex:   s.seatIndex,
       userId:      s.userId,
@@ -52,6 +63,9 @@ class GameRoomManager {
       // after a server restart the bot seat loses its isBot flag and only
       // moves via the 30-second disconnect auto-fold.
       isBot:       isBotUsername(s.user.username),
+      // Equipped cosmetics snapshot — read once at table-join. See note
+      // on Seat.equippedCosmetics about deferred mid-session refresh.
+      equippedCosmetics: equippedByUser.get(s.userId) ?? {},
     }));
 
     const engine = new PokerGameEngine(
