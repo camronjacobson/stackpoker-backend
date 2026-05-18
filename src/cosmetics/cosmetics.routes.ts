@@ -58,3 +58,94 @@ cosmeticsRouter.post('/purchase',
     }
   }
 );
+
+// Category regex shared by equip/unequip — accepts the catalog's existing
+// "cardBack" / "tableFelt" / etc. shape (camelCase, alphanumeric, no
+// hyphens or underscores). Bounded length protects against pathological
+// path-param payloads.
+const CATEGORY_REGEX = /^[a-zA-Z][a-zA-Z0-9]{1,30}$/;
+
+// POST /cosmetics/equip
+//
+// Body: { cosmeticId: string, category: string }
+//   - cosmeticId — catalog id; user must own this cosmetic
+//   - category   — must match the cosmetic's catalog category
+//
+// Response: { category: string, cosmeticId: string }
+//
+// Errors:
+//   COSMETIC_NOT_FOUND   404 — unknown cosmeticId
+//   CATEGORY_MISMATCH    409 — category arg ≠ cosmetic.category
+//   NOT_OWNED            403 — no CosmeticOwnership row
+//   VALIDATION_ERROR     422 — express-validator
+//   SERVER_ERROR         500 — anything unexpected
+cosmeticsRouter.post('/equip',
+  [
+    body('cosmeticId').isString().trim().isLength({ min: 1, max: 200 }),
+    body('category').isString().trim().matches(CATEGORY_REGEX),
+  ],
+  async (req: Request, res: Response) => {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      sendError(res, 'VALIDATION_ERROR', errors.array()[0].msg as string, 422);
+      return;
+    }
+    try {
+      const result = await cosmeticsService.equipCosmetic(
+        req.user!.sub,
+        req.body.cosmeticId,
+        req.body.category,
+      );
+      sendSuccess(res, result);
+    } catch (e: any) {
+      if (e && typeof e.code === 'string' && typeof e.status === 'number') {
+        sendError(res, e.code, e.message, e.status);
+        return;
+      }
+      sendServerError(res);
+    }
+  }
+);
+
+// DELETE /cosmetics/equip/:category
+//
+// Idempotent — succeeds even if the slot is already empty.
+// Response: { category: string, cosmeticId: null }
+//
+// Errors:
+//   VALIDATION_ERROR     422 — malformed category param
+//   SERVER_ERROR         500 — anything unexpected
+cosmeticsRouter.delete('/equip/:category',
+  async (req: Request, res: Response) => {
+    const category = req.params.category;
+    if (!CATEGORY_REGEX.test(category)) {
+      sendError(res, 'VALIDATION_ERROR', 'Invalid category', 422);
+      return;
+    }
+    try {
+      const result = await cosmeticsService.unequipCosmetic(req.user!.sub, category);
+      sendSuccess(res, result);
+    } catch (e: any) {
+      if (e && typeof e.code === 'string' && typeof e.status === 'number') {
+        sendError(res, e.code, e.message, e.status);
+        return;
+      }
+      sendServerError(res);
+    }
+  }
+);
+
+// GET /cosmetics/inventory
+//
+// One-call snapshot for iOS app-load sync. Always succeeds.
+// Response: { ownedIds: string[], equipped: { [category]: cosmeticId } }
+cosmeticsRouter.get('/inventory',
+  async (req: Request, res: Response) => {
+    try {
+      const result = await cosmeticsService.getUserInventory(req.user!.sub);
+      sendSuccess(res, result);
+    } catch (e: any) {
+      sendServerError(res);
+    }
+  }
+);

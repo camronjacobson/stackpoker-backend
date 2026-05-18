@@ -153,3 +153,156 @@ function isCodedError(e: unknown): e is CodedError {
   return typeof e === 'object' && e !== null
     && 'code' in e && 'message' in e && 'status' in e;
 }
+
+// ─── Equip ───────────────────────────────────────────────────────────────────
+//
+// Server-authoritative equip. Phase 4 vertical slice; takes over from the
+// previously iOS-local equip state (InventoryRepository.swift) so that
+// per-seat broadcast (Commit 2) can read a single source of truth and
+// opponents at the table see what each player has equipped.
+//
+// Flow:
+//   1. Look up cosmetic; reject if not found.
+//   2. Reject if the requested category doesn't match the cosmetic's category
+//      — iOS picks the category from the cosmetic itself, so a mismatch is a
+//      client bug that we want to surface loudly rather than silently rewrite.
+//   3. Confirm the user owns the cosmetic (CosmeticOwnership row exists).
+//      Without this guard a malicious client could equip anything in the
+//      catalog. Authoritative ownership lives in DB; we don't trust the client.
+//   4. Upsert EquippedCosmetic on (userId, category) — replaces any existing
+//      equip in that slot. The @@unique([userId, category]) constraint makes
+//      this race-safe; Prisma's upsert handles "row exists" without a manual
+//      pre-check.
+//
+// Returns the new equipped state for the category so iOS can update its
+// local cache without a separate roundtrip.
+
+export async function equipCosmetic(
+  userId: string,
+  cosmeticId: string,
+  category: string,
+): Promise<{ category: string; cosmeticId: string }> {
+
+  const cosmetic = await prisma.cosmetic.findUnique({ where: { id: cosmeticId } });
+  if (!cosmetic) {
+    throw err('COSMETIC_NOT_FOUND', 'Cosmetic does not exist', 404);
+  }
+
+  // Category match — the client must request equip in the cosmetic's own
+  // category. Reject mismatches as a client-bug signal.
+  if (cosmetic.category !== category) {
+    throw err(
+      'CATEGORY_MISMATCH',
+      `Cosmetic belongs to '${cosmetic.category}', not '${category}'`,
+      409,
+    );
+  }
+
+  // Ownership check — Prisma findUnique on the (userId, cosmeticId) composite.
+  const ownership = await prisma.cosmeticOwnership.findUnique({
+    where: { userId_cosmeticId: { userId, cosmeticId } },
+  });
+  if (!ownership) {
+    throw err('NOT_OWNED', 'User does not own this cosmetic', 403);
+  }
+
+  // Upsert. The composite unique (userId, category) means there's at most
+  // one row to update; if it doesn't exist yet, create it. Atomic relative
+  // to other concurrent equips because Postgres serializes on the unique
+  // index.
+  await prisma.equippedCosmetic.upsert({
+    where:  { userId_category: { userId, category } },
+    update: { cosmeticId, equippedAt: new Date() },
+    create: { userId, category, cosmeticId },
+  });
+
+  logger.info(`Cosmetic equipped: user=${userId} category=${category} cosmetic=${cosmeticId}`);
+  return { category, cosmeticId };
+}
+
+// ─── Unequip ─────────────────────────────────────────────────────────────────
+//
+// Removes the EquippedCosmetic row for (userId, category). Idempotent — if
+// no row exists, returns successfully without throwing. iOS treats the
+// response as "this slot is now empty" regardless of prior state.
+
+export async function unequipCosmetic(
+  userId: string,
+  category: string,
+): Promise<{ category: string; cosmeticId: null }> {
+
+  // deleteMany rather than delete: delete throws P2025 when no row matches,
+  // deleteMany silently no-ops with count=0. We want idempotent behavior so
+  // a retry from a flaky network doesn't surface a confusing error.
+  await prisma.equippedCosmetic.deleteMany({
+    where: { userId, category },
+  });
+
+  logger.info(`Cosmetic unequipped: user=${userId} category=${category}`);
+  return { category, cosmeticId: null };
+}
+
+// ─── Inventory ───────────────────────────────────────────────────────────────
+//
+// One-call snapshot for iOS app-load. Returns:
+//   - ownedIds:  array of cosmetic ids the user owns
+//   - equipped:  map of category → cosmeticId for slots the user has equipped
+//
+// Empty arrays / empty map for users who own nothing — no error, no special
+// case. iOS treats this as the canonical state and overwrites its local
+// UserDefaults cache.
+
+export async function getUserInventory(
+  userId: string,
+): Promise<{ ownedIds: string[]; equipped: { [category: string]: string } }> {
+
+  const [ownerships, equipped] = await Promise.all([
+    prisma.cosmeticOwnership.findMany({
+      where:  { userId },
+      select: { cosmeticId: true },
+    }),
+    prisma.equippedCosmetic.findMany({
+      where:  { userId },
+      select: { category: true, cosmeticId: true },
+    }),
+  ]);
+
+  const equippedMap: { [category: string]: string } = {};
+  for (const e of equipped) {
+    equippedMap[e.category] = e.cosmeticId;
+  }
+
+  return {
+    ownedIds: ownerships.map(o => o.cosmeticId),
+    equipped: equippedMap,
+  };
+}
+
+// ─── Bulk equipped lookup (for seat broadcast) ───────────────────────────────
+//
+// Commit 2 will use this to hydrate `Seat.equippedCosmetics` at table-join.
+// One query per table-join regardless of seat count — single findMany with
+// `userId in [...]`.
+
+export async function getEquippedForUsers(
+  userIds: string[],
+): Promise<Map<string, { [category: string]: string }>> {
+
+  if (userIds.length === 0) return new Map();
+
+  const rows = await prisma.equippedCosmetic.findMany({
+    where:  { userId: { in: userIds } },
+    select: { userId: true, category: true, cosmeticId: true },
+  });
+
+  const out = new Map<string, { [category: string]: string }>();
+  for (const r of rows) {
+    let slot = out.get(r.userId);
+    if (!slot) {
+      slot = {};
+      out.set(r.userId, slot);
+    }
+    slot[r.category] = r.cosmeticId;
+  }
+  return out;
+}
