@@ -151,3 +151,26 @@ single renderer file edit — no callers change.
 
 Defer until: post-TestFlight, or sooner if mythic-tier needs more "wow" in a
 marketing screenshot pass.
+
+---
+
+## iOS — `AdminPanelView.swift` is orphaned
+
+**Recorded:** 2026-05-18 (Phase 4b extension)
+
+`Features/Game/Views/AdminPanelView.swift` exists in the iOS source tree but
+has **no presentation site or references** anywhere in the codebase. The
+header comment claims "Accessible only to table owners and system admins"
+but there's no DEBUG gate, role check, or feature flag — the view is dead
+code that was scaffolded but never wired up.
+
+Today's actual dev surface lives in `SettingsSheet.devSection`
+(`Features/Profile/Views/ProfileView.swift:549-574`): a "Dev Tools" section
+gated client-side by being always visible, server-side by `isAdmin`. The
+Phase 4b extension added the "Add Test Friends" button here under
+`#if DEBUG` for build-flag enforcement.
+
+**Decision needed:** either wire `AdminPanelView` up with a clear story for
+what belongs there (kick/ban/grant from the table itself? full per-user
+admin?), or delete it cleanly. Don't bundle the cleanup with feature work —
+it should be its own follow-up commit so the diff is unambiguous.

@@ -1,6 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import { serializeBigInt } from '../shared/utils';
 import { Friend, SearchedUser } from '../lobby/lobby.types';
+import { getEquippedForUsers } from '../cosmetics/cosmetics.service';
 
 const prisma = new PrismaClient();
 
@@ -22,6 +23,14 @@ export async function getFriends(userId: string): Promise<Friend[]> {
   // Determine online status: last seen within 2 minutes
   const twoMinAgo = new Date(Date.now() - 2 * 60 * 1000);
 
+  // Batch-fetch equipped cosmetics for every friend in one query — same
+  // helper the seat-broadcast hydration uses, so the wire shape matches
+  // exactly: { [category]: cosmeticId }. Users with no equipped items are
+  // absent from the map; we coerce to `{}` so the iOS client always gets
+  // a deterministic dict rather than `null`.
+  const friendIds = friendships.map(f => (f.senderId === userId ? f.receiverId : f.senderId));
+  const equippedByUser = await getEquippedForUsers(friendIds);
+
   return friendships.map(f => {
     const friend = f.senderId === userId ? f.receiver : f.sender;
     const isOnline = friend.lastSeenAt > twoMinAgo;
@@ -33,6 +42,7 @@ export async function getFriends(userId: string): Promise<Friend[]> {
       avatarId: friend.avatarId,
       chipBalance: friend.chipBalance.toString(),
       isOnline,
+      equippedCosmetics: equippedByUser.get(friend.id) ?? {},
     }) as Friend;
   });
 }

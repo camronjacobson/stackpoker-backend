@@ -104,6 +104,10 @@ export interface Friend {
   isOnline: boolean;
   currentTableId?: string;
   chipBalance: string;
+  // Equipped cosmetics keyed by category raw value (e.g. "avatarFrame",
+  // "cardBack"). Always an object — empty `{}` when the friend has nothing
+  // equipped — so iOS doesn't have to handle nullability.
+  equippedCosmetics: { [category: string]: string };
 }
 
 export interface SearchedUser {

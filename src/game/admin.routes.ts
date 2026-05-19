@@ -94,3 +94,19 @@ adminRouter.post('/users/:userId/grant-chips',
     }
   }
 );
+
+// POST /admin/seed-test-friends
+//
+// Debug-only helper. Mints all 8 StackBot profiles as friends of the caller
+// and equips a different avatar frame on each so cosmetic rendering across
+// the friends list can be eyeballed without 8 real test accounts.
+// iOS gates the call site behind `#if DEBUG`; server also enforces isAdmin.
+adminRouter.post('/seed-test-friends', async (req: Request, res: Response) => {
+  try {
+    const result = await adminService.seedTestFriends(req.user!.sub);
+    sendSuccess(res, result);
+  } catch (err: any) {
+    if (err.code) sendError(res, err.code, err.message, 403);
+    else sendServerError(res);
+  }
+});

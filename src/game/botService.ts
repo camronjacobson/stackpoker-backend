@@ -56,6 +56,29 @@ export function hashStringToInt(s: string): number {
 
 const BOT_CHIPS = BigInt(10_000_000);
 
+// Lazy-create a bot User row keyed by its `username`. Idempotent: subsequent
+// calls return the existing row untouched. Pulled out of `addBotToTable` so
+// the admin test-friend seeding endpoint can guarantee all 8 bot rows exist
+// up-front (so frame-equip and friendship inserts have stable userIds to
+// reference) without duplicating the create-or-fetch logic.
+export type BotProfile = (typeof BOT_PROFILES)[number];
+
+export async function ensureBotUser(profile: BotProfile) {
+  let bot = await prisma.user.findUnique({ where: { username: profile.username } });
+  if (!bot) {
+    bot = await prisma.user.create({
+      data: {
+        username:    profile.username,
+        displayName: profile.displayName,
+        avatarId:    profile.avatarId,
+        chipBalance: BOT_CHIPS,
+      },
+    });
+    logger.info(`Bot user created: ${bot.id} (${profile.username})`);
+  }
+  return bot;
+}
+
 export async function addBotToTable(tableId: string): Promise<void> {
   // ── Load table ────────────────────────────────────────────────────────────
   const table = await prisma.pokerTable.findUnique({ where: { id: tableId } });
@@ -73,18 +96,7 @@ export async function addBotToTable(tableId: string): Promise<void> {
   if (!profile) throw new Error('All bot profiles already seated at this table');
 
   // ── Ensure bot user exists (lazy-create per profile) ─────────────────────
-  let bot = await prisma.user.findUnique({ where: { username: profile.username } });
-  if (!bot) {
-    bot = await prisma.user.create({
-      data: {
-        username:    profile.username,
-        displayName: profile.displayName,
-        avatarId:    profile.avatarId,
-        chipBalance: BOT_CHIPS,
-      },
-    });
-    logger.info(`Bot user created: ${bot.id} (${profile.username})`);
-  }
+  const bot = await ensureBotUser(profile);
 
   // ── Check for existing active session ─────────────────────────────────────
   // Belt-and-suspenders with the in-engine check above: handles the edge case

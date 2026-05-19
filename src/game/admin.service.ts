@@ -1,6 +1,7 @@
 import { PrismaClient } from '@prisma/client';
 import { roomManager } from '../game/roomManager';
 import { serializeBigInt, logger } from '../shared/utils';
+import { BOT_PROFILES, ensureBotUser } from './botService';
 
 const prisma = new PrismaClient();
 
@@ -163,6 +164,123 @@ export async function grantChips(
   ]);
 
   logger.info(`Admin grant: ${amount} chips to ${targetUserId} by ${requesterId}`);
+}
+
+// ─── Seed test friends (debug helper) ─────────────────────────────────────────
+//
+// Mints all 8 BOT_PROFILES into mutual friendships with the caller and equips
+// a different avatar frame on each so the caller can verify per-friend cosmetic
+// rendering in the friends list without needing 8 real test accounts.
+//
+// Mapping (Alpha intentionally has no frame — control case for "nothing equipped"):
+//   Alpha   → null              Echo    → diamond  (epic)
+//   Bravo   → bronze   (common) Foxtrot → royal    (epic)
+//   Charlie → gold     (rare)   Golf    → champion (legendary)
+//   Delta   → platinum (rare)   Hotel   → mythic_inferno (mythic)
+//
+// Gated by isAdmin server-side. iOS gates the call site behind `#if DEBUG`
+// so the button doesn't ship in App Store builds. Idempotent — re-running
+// skips already-accepted friendships and just re-upserts the equipped frame.
+
+const BOT_FRAME_ASSIGNMENTS: Record<string, string | null> = {
+  StackBot_Alpha:   null,
+  StackBot_Bravo:   'avatar_frame_bronze',
+  StackBot_Charlie: 'avatar_frame_gold',
+  StackBot_Delta:   'avatar_frame_platinum',
+  StackBot_Echo:    'avatar_frame_diamond',
+  StackBot_Foxtrot: 'avatar_frame_royal',
+  StackBot_Golf:    'avatar_frame_champion',
+  StackBot_Hotel:   'avatar_frame_mythic_inferno',
+};
+
+export interface SeedTestFriendsResult {
+  seeded: Array<{ username: string; frameId: string | null; alreadyFriends: boolean }>;
+  totalFriends: number;
+}
+
+export async function seedTestFriends(requesterId: string): Promise<SeedTestFriendsResult> {
+  const requester = await prisma.user.findUnique({ where: { id: requesterId } });
+  if (!requester) throw { code: 'NOT_FOUND', message: 'Requester not found' };
+  if (!requester.isAdmin) throw { code: 'FORBIDDEN', message: 'Admin only' };
+
+  const seeded: SeedTestFriendsResult['seeded'] = [];
+
+  // Single transaction so a mid-loop failure (e.g. a dropped DB connection
+  // between the 4th and 5th bot) doesn't leave the caller with a partial
+  // test-friend set — re-runs would still work, but auditing "did the
+  // seeding succeed?" gets murky. All-or-nothing keeps the mental model clean.
+  await prisma.$transaction(async (tx) => {
+    for (const profile of BOT_PROFILES) {
+      // `ensureBotUser` uses the module-level prisma client, not the tx
+      // client, so its writes commit independently. That's fine — bot User
+      // rows are append-only, idempotent on username uniqueness, and reused
+      // across many flows (table-add, seeding, future bot affordances).
+      // Pulling them out of the transaction also means the bot row is
+      // visible to the equip/friendship inserts inside the tx below.
+      const bot = await ensureBotUser(profile);
+      const frameId = BOT_FRAME_ASSIGNMENTS[profile.username] ?? null;
+
+      // Bots don't have inventory records. Direct-write the equipped row
+      // rather than grant + equip — purely test scaffolding.
+      if (frameId) {
+        await tx.equippedCosmetic.upsert({
+          where: { userId_category: { userId: bot.id, category: 'avatarFrame' } },
+          update: { cosmeticId: frameId },
+          create: { userId: bot.id, category: 'avatarFrame', cosmeticId: frameId },
+        });
+      } else {
+        // Alpha is the "no frame equipped" control case — actively clear any
+        // stale row so re-runs after a mapping change reflect the new state.
+        await tx.equippedCosmetic.deleteMany({
+          where: { userId: bot.id, category: 'avatarFrame' },
+        });
+      }
+
+      // Friendship rows are stored as a SINGLE directional row per pair —
+      // `getFriends` resolves the other party via OR on senderId/receiverId.
+      // Creating two rows would make the bot appear twice in the friends
+      // list. Look up either direction; if any ACCEPTED row exists, skip.
+      // If a PENDING row exists, upgrade it to ACCEPTED (covers the edge
+      // case where someone previously sent a friend request to a bot and
+      // it sat un-accepted — re-running the seed should heal that state).
+      // BLOCKED rows are left alone; explicit user action shouldn't be
+      // silently overridden by a debug button.
+      const existing = await tx.friendship.findFirst({
+        where: {
+          OR: [
+            { senderId: requesterId, receiverId: bot.id },
+            { senderId: bot.id,      receiverId: requesterId },
+          ],
+        },
+      });
+
+      const alreadyFriends = existing?.status === 'ACCEPTED';
+      if (!existing) {
+        await tx.friendship.create({
+          data: { senderId: requesterId, receiverId: bot.id, status: 'ACCEPTED' },
+        });
+      } else if (existing.status === 'PENDING') {
+        await tx.friendship.update({
+          where: { id: existing.id },
+          data:  { status: 'ACCEPTED' },
+        });
+      }
+      // existing.status === 'ACCEPTED' or 'BLOCKED' → no row change.
+
+      seeded.push({ username: profile.username, frameId, alreadyFriends });
+    }
+  });
+
+  // Re-count after the transaction so the response reflects the final state.
+  const totalFriends = await prisma.friendship.count({
+    where: {
+      status: 'ACCEPTED',
+      OR: [{ senderId: requesterId }, { receiverId: requesterId }],
+    },
+  });
+
+  logger.info(`Admin seed-test-friends: ${seeded.length} bot friendships processed for ${requesterId}`);
+  return { seeded, totalFriends };
 }
 
 // ─── Get table admin view ─────────────────────────────────────────────────────
