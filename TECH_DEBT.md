@@ -174,3 +174,28 @@ Phase 4b extension added the "Add Test Friends" button here under
 what belongs there (kick/ban/grant from the table itself? full per-user
 admin?), or delete it cleanly. Don't bundle the cleanup with feature work —
 it should be its own follow-up commit so the diff is unambiguous.
+
+---
+
+## CardBackRenderer — only 2 of 8 catalog ids supported
+
+**Recorded:** 2026-05-18 (store redesign)
+
+`CardBackRenderer.supports(_:)` returns true only for
+`card_back_classic_red` and `card_back_classic_blue`. The other 6 card-back
+ids in `cosmetics_catalog.json` (vegas_neon, midnight_velvet, vintage_lace,
+desert_dune, blueprint, geode_purple) fall through to the
+`CosmeticImageView` placeholder, so the Card Backs section in the
+redesigned store mixes procedural renders with rarity-tinted placeholder
+tiles.
+
+Acceptable short-term — the procedural-vs-placeholder split is visible but
+not confusing (placeholders carry the cosmetic name and rarity, so the
+player still understands what's for sale). The visual inconsistency is
+the only real cost.
+
+Extend the renderer to cover the remaining 6 ids in a follow-up commit,
+separate from store redesign — purely a renderer addition, no callsite
+changes. The store's `StoreCosmeticPreview` dispatch automatically picks
+the procedural branch as soon as `CardBackRenderer.supports(id)` returns
+true for that id.
