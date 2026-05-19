@@ -12,7 +12,7 @@
 -- profile-seed migration also inserts StackBot_Alpha — it would conflict
 -- there, not here.
 
-UPDATE "User"
+UPDATE "users"
 SET "username"    = 'StackBot_Alpha',
     "displayName" = 'Stack Bot Alpha'
 WHERE "username" = 'StackBot';
