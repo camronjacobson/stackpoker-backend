@@ -199,3 +199,40 @@ separate from store redesign — purely a renderer addition, no callsite
 changes. The store's `StoreCosmeticPreview` dispatch automatically picks
 the procedural branch as soon as `CardBackRenderer.supports(id)` returns
 true for that id.
+
+---
+
+## Locker — empty-state "Visit Store" deep-link is dismiss-only
+
+**Recorded:** 2026-05-18
+
+The Locker v1 (`Features/Cosmetics/Views/LockerView.swift`) renders a
+per-category empty state with a "Visit Store" CTA when the player owns
+zero items in that category. Today the CTA only dismisses the Locker
+cover and drops the player back on whatever Store meta-tab they were on
+when they entered — it does **not** programmatically scroll the Store to
+the matching sub-category section.
+
+### Why deferred
+
+v1 ships with two categories (avatar frames + card backs) and the
+catalog seeds every account with one purchasable item in each, so the
+empty state effectively only appears when a future category lands with
+zero seeded ownership. Building the deep-link plumbing now would add:
+
+- A `StoreView` programmatic-scroll surface keyed by `CosmeticCategory`.
+- A meta-tab auto-switch (the target category may live in a different
+  meta-tab than the one the player has open).
+- A scroll-after-layout settle in StoreView's onAppear so the target
+  section is actually on-screen when the user lands.
+
+None of that is load-bearing for v1.
+
+### Follow-up shape
+
+Add a `pendingScrollTarget: CosmeticCategory?` to StoreViewModel, set
+it from the Locker dismiss callback, and consume it in StoreView's
+onAppear (switch meta-tab → ScrollViewReader.scrollTo). Keep the
+dismiss-only path as the fallback for cases where the target category
+isn't in the active catalog (network failures, feature-flagged
+categories, etc.).
