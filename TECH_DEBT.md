@@ -236,3 +236,41 @@ onAppear (switch meta-tab → ScrollViewReader.scrollTo). Keep the
 dismiss-only path as the fallback for cases where the target category
 isn't in the active catalog (network failures, feature-flagged
 categories, etc.).
+
+---
+
+## iOS: `addBot()` swallows server errors silently
+
+**Recorded:** 2026-05-18
+
+`Features/Game/ViewModels/GameViewModel.swift:926` sets
+`errorMessage` on bot-add failure (e.g. `BOT_ERROR: Bot already at this
+table`, `Table is full`, network failure) but **nothing surfaces it to
+the user**. The user taps "Add Bot", nothing visible happens, and the
+only signal is a value set on `@Published var errorMessage` that no
+on-screen toast/banner currently observes in the table scene.
+
+### Why this hurt us
+
+This bug masked the actual root cause of the "can't add multiple bots
+in TestFlight" report on 2026-05-18 — the backend was running stale
+single-bot code, so the second add-bot call returned 400 with a
+meaningful error message, but the iOS side ate it. User experience was
+indistinguishable from "feature silently broken" instead of "server
+rejected the request because <reason>".
+
+### Follow-up shape
+
+Wire `errorMessage` into a transient toast on the table scene (sibling
+of the `EquipErrorToast` / `PurchaseErrorToast` pattern in
+`StoreView.swift`). 3s auto-dismiss, tap-to-dismiss, ink-stroked
+warning style consistent with the existing toasts. Same wiring should
+cover other GameViewModel error paths that today only set
+`errorMessage` (grep `errorMessage =` in GameViewModel.swift —
+multiple call sites have the same silent-error problem).
+
+Keep the gate narrow: a generic "Something went wrong" toast is worse
+than nothing because it gives the user no actionable info. Mirror the
+existing toasts which pattern-match on a concrete error enum and
+produce specific copy ("Table is full", "All bot profiles already
+seated", etc.).
