@@ -45,28 +45,39 @@ class GameRoomManager {
     const userIds = table.sessions.map(s => s.userId);
     const equippedByUser = await getEquippedForUsers(userIds);
 
-    const seats = table.sessions.map(s => ({
-      seatIndex:   s.seatIndex,
-      userId:      s.userId,
-      username:    s.user.username,
-      displayName: s.user.displayName,
-      avatarId:    s.user.avatarId,
-      stack:       Number(s.currentStack),
-      status:      'WAITING' as const,
-      // No persistent time bank — players get a fixed 15s per turn and can
-      // tap "+15s" once per turn to extend (see TIME_EXTENSION_MS in
-      // gameEngine.ts). Keeping this at 0 means actionDeadline math
-      // collapses to just TURN_DURATION_MS.
-      timeBank:    0,
-      isConnected: false,
-      // Tag bot seats so the engine auto-acts on their turn. Without this,
-      // after a server restart the bot seat loses its isBot flag and only
-      // moves via the 30-second disconnect auto-fold.
-      isBot:       isBotUsername(s.user.username),
-      // Equipped cosmetics snapshot — read once at table-join. See note
-      // on Seat.equippedCosmetics about deferred mid-session refresh.
-      equippedCosmetics: equippedByUser.get(s.userId) ?? {},
-    }));
+    const seats = table.sessions.map(s => {
+      const isBot = isBotUsername(s.user.username);
+      return {
+        seatIndex:   s.seatIndex,
+        userId:      s.userId,
+        username:    s.user.username,
+        displayName: s.user.displayName,
+        avatarId:    s.user.avatarId,
+        stack:       Number(s.currentStack),
+        status:      'WAITING' as const,
+        // No persistent time bank — players get a fixed 15s per turn and can
+        // tap "+15s" once per turn to extend (see TIME_EXTENSION_MS in
+        // gameEngine.ts). Keeping this at 0 means actionDeadline math
+        // collapses to just TURN_DURATION_MS.
+        timeBank:    0,
+        isConnected: false,
+        // Tag bot seats so the engine auto-acts on their turn. Without this,
+        // after a server restart the bot seat loses its isBot flag and only
+        // moves via the 30-second disconnect auto-fold.
+        isBot,
+        // Equipped cosmetics snapshot — read once at table-join. Bots get
+        // the Phase 4 test scaffold (classic-blue cardBack) so a server
+        // restart re-seats them with the same back the iOS client expects;
+        // human seats read from getEquippedForUsers. See note on
+        // Seat.equippedCosmetics about deferred mid-session refresh.
+        equippedCosmetics: isBot
+          ? {
+              cardBack:    'card_back_classic_blue',
+              avatarFrame: 'avatar_frame_mythic_inferno',
+            }
+          : (equippedByUser.get(s.userId) ?? {}),
+      };
+    });
 
     const engine = new PokerGameEngine(
       tableId,

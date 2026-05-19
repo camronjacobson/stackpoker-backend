@@ -115,3 +115,39 @@ ship:
 
 Until then the tactical approach holds: server-authoritative, response-driven,
 HUD updates one runloop tick after the action.
+
+---
+
+## Cosmetics — avatar frame visibility on non-self avatar sites
+
+**Recorded:** 2026-05-18 (Phase 4b)
+
+Phase 4b wired `AvatarFrameRenderer` into the four hero-facing avatar render
+sites (lobby header, profile header in tabbed root, profile-edit header) and
+into the seat-level inline avatar in `PokerTableView.TargetSeatView`. The
+table render path is the only **non-self** site that can render a frame today,
+and only because seats carry `equippedCosmetics` over the wire.
+
+### Sites that still render bare avatars for other users
+
+| Call site                                            | Why it cannot show frames yet |
+| ---------------------------------------------------- | ----------------------------- |
+| Friends list rows                                    | `FriendProfile` payload has no cosmetics field — would need backend extension and a per-friend cache. |
+| Invite picker / friend-search results                | Same — `UserSearchResult` is name + avatarUrl + id only. |
+| Table card rows in lobby                             | Lobby table summary doesn't enumerate seat occupants' cosmetics, just count + names. |
+| Profile picker preview (`ProfileView.swift:740`)     | Skipped on purpose — overlaying a frame around the emoji being edited muddies what the user is selecting. Leave bare. |
+
+When extending: pick **one** payload field name (`equippedCosmetics: { [category]: id }`)
+and reuse the iOS `AvatarView(avatarFrameId:)` plumbing already in place. No
+renderer changes needed — only data plumbing.
+
+### Mythic_inferno animation (polish pass)
+
+The `avatar_frame_mythic_inferno` renderer ships as a **static** AngularGradient
+flame ring in Phase 4b. The intended polish-pass version uses `TimelineView` to
+rotate the gradient (~6s per revolution) and adds particle flame tongues
+licking outward from the four cardinal spikes. Estimated work: 30-45 min,
+single renderer file edit — no callers change.
+
+Defer until: post-TestFlight, or sooner if mythic-tier needs more "wow" in a
+marketing screenshot pass.

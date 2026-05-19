@@ -136,6 +136,14 @@ export async function addBotToTable(tableId: string): Promise<void> {
     timeBank:    0,
     isConnected: true,
     isBot:       true,
+    // Phase 4 test scaffold: force the classic-blue card back on every bot
+    // so the iOS client can verify cosmetic broadcast end-to-end without
+    // needing two real accounts. Remove once a real bot-cosmetic policy
+    // lands (e.g. per-personality skins) or smoke testing wraps.
+    equippedCosmetics: {
+      cardBack:    'card_back_classic_blue',
+      avatarFrame: 'avatar_frame_mythic_inferno',
+    },
   });
 
   logger.info(`Bot added to table ${tableId} at seat ${seatIndex} (${profile.username})`);
