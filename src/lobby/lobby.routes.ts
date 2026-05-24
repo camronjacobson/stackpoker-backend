@@ -89,16 +89,29 @@ lobbyRouter.post('/join/:code',
   ],
   async (req: Request, res: Response) => {
     if (!handleValidation(req, res)) return;
+    const userId   = req.user!.sub;
+    const joinCode = req.params.code;
+    logger.info(`[STATE] event=http_join_start userId=${userId} joinCode=${joinCode} buyInAmount=${req.body.buyInAmount} seatIndex=${req.body.seatIndex ?? 'auto'}`);
     try {
-      const table = await lobbyService.joinTableByCode(
-        req.user!.sub,
-        req.params.code,
-        req.body
-      );
+      const table = await lobbyService.joinTableByCode(userId, joinCode, req.body);
+      logger.info(`[STATE] event=http_join_success userId=${userId} joinCode=${joinCode} tableId=${(table as any).id} newBalance=${(table as any).newBalance}`);
       sendSuccess(res, table);
     } catch (err: any) {
-      if (err.code) sendError(res, err.code, err.message, 400);
-      else { logger.error('Join table error:', err); sendServerError(res); }
+      // Symptom 3 instrumentation — surface the exact error code that the
+      // iOS client receives so it can be cross-referenced with the user
+      // bug report. Every documented throw site in joinTableByCode /
+      // joinTable carries a specific code (INVALID_CODE, TABLE_CLOSED,
+      // GAME_IN_PROGRESS, NOT_FOUND, INVALID_BUYIN, TABLE_FULL,
+      // INSUFFICIENT_CHIPS). Anything without a code is a true server
+      // error — logged separately at error level.
+      if (err.code) {
+        logger.warn(`[STATE] event=http_join_error userId=${userId} joinCode=${joinCode} code=${err.code} message="${err.message}"`);
+        sendError(res, err.code, err.message, 400);
+      } else {
+        logger.error('Join table error:', err);
+        logger.error(`[STATE] event=http_join_error userId=${userId} joinCode=${joinCode} code=UNHANDLED message="${err?.message ?? String(err)}"`);
+        sendServerError(res);
+      }
     }
   }
 );
