@@ -71,14 +71,19 @@ async function clearSessionDisconnected(userId: string, tableId: string) {
 }
 
 async function autoLeave(userId: string, tableId: string) {
+  logger.info(`[STATE] event=auto_leave_start userId=${userId} tableId=${tableId}`);
   try {
     await lobbyService.leaveTable(userId, tableId);
     logger.info(`Auto-leave: freed ${userId} from ${tableId} after grace period`);
+    logger.info(`[STATE] event=auto_leave_success userId=${userId} tableId=${tableId}`);
   } catch (err: any) {
     // GAME_IN_PROGRESS / NOT_AT_TABLE are expected non-errors — the user
     // either left already or is mid-hand. Anything else is real.
     if (err?.code !== 'GAME_IN_PROGRESS' && err?.code !== 'NOT_AT_TABLE') {
       logger.error('autoLeave failed:', err);
+      logger.warn(`[STATE] event=auto_leave_error userId=${userId} tableId=${tableId} code=${err?.code ?? 'UNKNOWN'}`);
+    } else {
+      logger.info(`[STATE] event=auto_leave_skipped userId=${userId} tableId=${tableId} code=${err.code}`);
     }
   }
 }
@@ -197,6 +202,10 @@ async function sweepDisconnectedSessions(): Promise<void> {
     select: { userId: true, tableId: true },
   });
 
+  if (stale.length > 0) {
+    logger.info(`[STATE] event=disconnect_sweep_tick staleCount=${stale.length} cutoffMs=${cutoff.toISOString()} ids=${stale.map(s => `${s.userId}@${s.tableId}`).join(',')}`);
+  }
+
   for (const s of stale) {
     logger.info(`Disconnect sweep: auto-leaving ${s.userId} from ${s.tableId}`);
     await autoLeave(s.userId, s.tableId);
@@ -251,6 +260,7 @@ async function sweepIdleTables(io: SocketServer): Promise<void> {
       if (now - last < TABLE_IDLE_MS) continue;
 
       logger.info(`Idle sweep: closing "${t.name}" (${t.id}) — idle ${Math.round((now - last) / 1000)}s`);
+      logger.info(`[STATE] event=idle_sweep_close tableId=${t.id} name=${t.name} idleSeconds=${Math.round((now - last) / 1000)}`);
       await forceCloseIdleTable(io, t.id);
     } catch (err) {
       logger.error(`Idle sweep error for table ${t.id}:`, err);
@@ -338,11 +348,13 @@ export function registerSocketHandlers(io: SocketServer): void {
     const userId   = uid(socket);
     const username = uname(socket);
     logger.info(`WS connected: ${username}`);
+    logger.info(`[STATE] event=ws_connect userId=${userId} username=${username} socketId=${socket.id}`);
     socket.join(userRoom(userId));
 
     socket.on('join_table', async (payload: { tableId: string }) => {
       try {
         const { tableId } = payload;
+        logger.info(`[STATE] event=ws_join_table_start userId=${userId} tableId=${tableId} socketId=${socket.id}`);
 
         // Re-debit the wallet if the user soft-left with chips and is now
         // returning. This MUST run before we read the session below so the
@@ -359,6 +371,7 @@ export function registerSocketHandlers(io: SocketServer): void {
           emitChipsUpdated(io, userId, r.newBalance, r.didDebit ? 'rejoin_redebit' : 'rejoin_noop');
         } catch (err: any) {
           if (err?.code === 'INSUFFICIENT_CHIPS') {
+            logger.warn(`[STATE] event=ws_join_table_error reason=INSUFFICIENT_CHIPS userId=${userId} tableId=${tableId} message="${err.message}"`);
             emit(socket, 'error', { code: err.code, message: err.message });
             return;
           }
@@ -377,7 +390,16 @@ export function registerSocketHandlers(io: SocketServer): void {
           where: { tableId_userId: { tableId, userId } },
           include: { user: { select: { username: true, displayName: true, avatarId: true } } },
         });
-        if (!session?.isActive) { emit(socket, 'error', { code: 'NOT_SEATED', message: 'Not seated at this table' }); return; }
+        if (!session?.isActive) {
+          // High-signal log line for Symptom 1/2: this fires when the DB
+          // session has been swept (isActive=false) between the soft-leave
+          // and the rejoin attempt. Cross-reference timestamp against the
+          // matching auto_leave_success and disconnect_sweep_tick markers
+          // to confirm the race window.
+          logger.warn(`[STATE] event=ws_join_table_error reason=NOT_SEATED userId=${userId} tableId=${tableId} sessionFound=${!!session} isActive=${session?.isActive ?? null}`);
+          emit(socket, 'error', { code: 'NOT_SEATED', message: 'Not seated at this table' });
+          return;
+        }
 
         socket.join(tableRoom(tableId));
         (socket as any).currentTableId = tableId;
@@ -429,8 +451,10 @@ export function registerSocketHandlers(io: SocketServer): void {
         socket.to(tableRoom(tableId)).emit('player_reconnected', { event: 'player_reconnected', data: { userId, username }, ts: Date.now() });
 
         if (engine.canStartHand()) setTimeout(() => engine.startHand(), 1500);
-      } catch (err) {
+        logger.info(`[STATE] event=ws_join_table_success userId=${userId} tableId=${tableId} seatIndex=${session.seatIndex} stack=${session.currentStack.toString()} reAdded=${!hasSeat}`);
+      } catch (err: any) {
         logger.error('join_table error:', err);
+        logger.warn(`[STATE] event=ws_join_table_error reason=SERVER_ERROR userId=${userId} tableId=${payload?.tableId ?? 'unknown'} code=${err?.code ?? 'UNKNOWN'} message="${err?.message ?? String(err)}"`);
         emit(socket, 'error', { code: 'SERVER_ERROR', message: 'Failed to join table' });
       }
     });
@@ -571,8 +595,14 @@ export function registerSocketHandlers(io: SocketServer): void {
 
     socket.on('ping', () => emit(socket, 'pong', { ts: Date.now() }));
 
-    socket.on('disconnect', () => {
+    socket.on('disconnect', (reason: string) => {
       const tableId = (socket as any).currentTableId as string | null;
+      // Socket.IO disconnect reasons include 'client namespace disconnect'
+      // (intentional client-side .disconnect()), 'transport close' (network
+      // drop), 'ping timeout' (heartbeat miss), 'transport error', etc.
+      // Distinguishing these tells us if "can't rejoin" is preceded by an
+      // intentional teardown vs an unexpected drop.
+      logger.info(`[STATE] event=ws_disconnect userId=${userId} username=${username} socketId=${socket.id} reason=${reason} currentTableId=${tableId ?? 'none'}`);
       if (tableId) {
         const engine = roomManager.get(tableId);
         if (engine) engine.setConnected(userId, false);
