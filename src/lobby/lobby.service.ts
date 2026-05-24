@@ -299,16 +299,19 @@ export async function leaveTable(
   userId: string,
   tableId: string,
 ): Promise<{ chipsReturned: string; newBalance: string }> {
+  logger.info(`[STATE] event=leave_table_start userId=${userId} tableId=${tableId}`);
   const session = await prisma.tableSession.findUnique({
     where: { tableId_userId: { tableId, userId } },
   });
 
   if (!session || !session.isActive) {
+    logger.warn(`[STATE] event=leave_table_error reason=NOT_AT_TABLE userId=${userId} tableId=${tableId} sessionFound=${!!session} isActive=${session?.isActive ?? null}`);
     throw { code: 'NOT_AT_TABLE', message: 'You are not at this table' };
   }
 
   const table = await prisma.pokerTable.findUnique({ where: { id: tableId } });
   if (table?.status === 'IN_PROGRESS') {
+    logger.warn(`[STATE] event=leave_table_error reason=GAME_IN_PROGRESS userId=${userId} tableId=${tableId} sessionId=${session.id}`);
     throw { code: 'GAME_IN_PROGRESS', message: 'Cannot leave during a hand. Wait for the hand to end.' };
   }
 
@@ -355,10 +358,12 @@ export async function leaveTable(
       where: { id: tableId },
       data: { status: 'CLOSED', closedAt: new Date() },
     });
+    logger.info(`[STATE] event=leave_table_closed_empty userId=${userId} tableId=${tableId}`);
   }
 
   const returned = session.chipsReturned ? 0n : stack;
   logger.info(`User ${userId} left table ${tableId}, returned ${returned} chips (already-credited=${session.chipsReturned})`);
+  logger.info(`[STATE] event=leave_table_success userId=${userId} tableId=${tableId} sessionId=${session.id} returned=${returned.toString()} alreadyCredited=${session.chipsReturned} remainingSeated=${remaining} newBalance=${newBalance.toString()}`);
   return {
     chipsReturned: returned.toString(),
     newBalance:    newBalance.toString(),
@@ -378,10 +383,12 @@ export async function softLeaveCashOut(
   userId: string,
   tableId: string,
 ): Promise<{ chipsReturned: string; newBalance: string }> {
+  logger.info(`[STATE] event=soft_leave_start userId=${userId} tableId=${tableId}`);
   const session = await prisma.tableSession.findUnique({
     where: { tableId_userId: { tableId, userId } },
   });
   if (!session || !session.isActive) {
+    logger.warn(`[STATE] event=soft_leave_error reason=NOT_AT_TABLE userId=${userId} tableId=${tableId} sessionFound=${!!session} isActive=${session?.isActive ?? null}`);
     throw { code: 'NOT_AT_TABLE', message: 'You are not at this table' };
   }
   // Already cashed-out and waiting for rejoin — just refresh the timer.
@@ -399,10 +406,12 @@ export async function softLeaveCashOut(
         select: { chipBalance: true },
       });
     });
+    logger.info(`[STATE] event=soft_leave_noop_already_returned userId=${userId} tableId=${tableId} sessionId=${session.id} stack=${session.currentStack.toString()}`);
     return { chipsReturned: '0', newBalance: (updated?.chipBalance ?? 0n).toString() };
   }
   const table = await prisma.pokerTable.findUnique({ where: { id: tableId } });
   if (table?.status === 'IN_PROGRESS') {
+    logger.warn(`[STATE] event=soft_leave_error reason=GAME_IN_PROGRESS userId=${userId} tableId=${tableId} sessionId=${session.id}`);
     throw { code: 'GAME_IN_PROGRESS', message: 'Cannot leave during a hand. Wait for the hand to end.' };
   }
 
@@ -433,6 +442,7 @@ export async function softLeaveCashOut(
   });
 
   logger.info(`User ${userId} soft-left table ${tableId}, returned ${stack} chips (seat held for rejoin)`);
+  logger.info(`[STATE] event=soft_leave_success userId=${userId} tableId=${tableId} sessionId=${session.id} stack=${stack.toString()} newBalance=${post.chipBalance.toString()}`);
   return { chipsReturned: stack.toString(), newBalance: post.chipBalance.toString() };
 }
 
@@ -446,6 +456,7 @@ export async function rejoinRedebit(
   userId: string,
   tableId: string,
 ): Promise<{ newBalance: string; didDebit: boolean }> {
+  logger.info(`[STATE] event=rejoin_redebit_start userId=${userId} tableId=${tableId}`);
   const session = await prisma.tableSession.findUnique({
     where: { tableId_userId: { tableId, userId } },
   });
@@ -456,12 +467,18 @@ export async function rejoinRedebit(
       where: { id: userId },
       select: { chipBalance: true },
     });
+    // This branch fires on a normal first-join (no prior session at all),
+    // and ALSO on the symptom-1 failure path where the sweeper has flipped
+    // isActive=false between the soft-leave and the rejoin attempt — making
+    // it the highest-signal log line for the rejoin race.
+    logger.info(`[STATE] event=rejoin_redebit_noop userId=${userId} tableId=${tableId} sessionFound=${!!session} isActive=${session?.isActive ?? null} chipsReturned=${session?.chipsReturned ?? null}`);
     return { newBalance: (u?.chipBalance ?? 0n).toString(), didDebit: false };
   }
 
   const user = await prisma.user.findUnique({ where: { id: userId } });
   const stack = session.currentStack;
   if (!user || user.chipBalance < stack) {
+    logger.warn(`[STATE] event=rejoin_redebit_error reason=INSUFFICIENT_CHIPS userId=${userId} tableId=${tableId} sessionId=${session.id} need=${stack.toString()} have=${(user?.chipBalance ?? 0n).toString()}`);
     throw {
       code: 'INSUFFICIENT_CHIPS',
       message: `Not enough chips to reseat. Need ${stack.toString()} but have ${(user?.chipBalance ?? 0n).toString()}.`,
@@ -495,6 +512,7 @@ export async function rejoinRedebit(
   });
 
   logger.info(`User ${userId} rejoined table ${tableId}, re-debited ${stack} chips`);
+  logger.info(`[STATE] event=rejoin_redebit_success userId=${userId} tableId=${tableId} sessionId=${session.id} stack=${stack.toString()} newBalance=${post.chipBalance.toString()}`);
   return { newBalance: post.chipBalance.toString(), didDebit: true };
 }
 
