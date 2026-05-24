@@ -108,14 +108,17 @@ app.use((err: any, _req: express.Request, res: express.Response, _next: express.
 // when nobody is actually there) until each ghost user happens to log
 // back in and explicitly leave.
 async function reconcileOrphanedSessions(): Promise<void> {
+  logger.info('[STATE] event=startup_reconcile_start');
   const orphans = await prisma.tableSession.findMany({
     where: { isActive: true },
     select: { id: true, userId: true, tableId: true, currentStack: true },
   });
   if (orphans.length === 0) {
     logger.info('Startup reconcile: no orphaned sessions');
+    logger.info('[STATE] event=startup_reconcile_success orphans=0 tablesAffected=0 tablesClosed=0');
     return;
   }
+  logger.info(`[STATE] event=startup_reconcile_found orphans=${orphans.length} ids=${orphans.map(o => `${o.userId}@${o.tableId}`).join(',')}`);
 
   // Group stacks by userId so each user gets one chip increment.
   const refundByUser = new Map<string, bigint>();
@@ -174,6 +177,11 @@ async function reconcileOrphanedSessions(): Promise<void> {
   logger.info(
     `Startup reconcile: cleared ${orphans.length} orphaned sessions across ${affectedTableIds.length} tables, closed ${closed} empty tables`
   );
+  // Aggregate refunds totals for the success marker — sum bigint stacks per
+  // user-side increment without re-reading the DB.
+  let totalRefundedChips = 0n;
+  for (const amt of refundByUser.values()) totalRefundedChips += amt;
+  logger.info(`[STATE] event=startup_reconcile_success orphans=${orphans.length} tablesAffected=${affectedTableIds.length} tablesClosed=${closed} usersRefunded=${refundByUser.size} totalChipsRefunded=${totalRefundedChips.toString()}`);
 }
 
 async function start() {
