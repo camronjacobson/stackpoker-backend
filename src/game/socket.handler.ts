@@ -386,16 +386,40 @@ export function registerSocketHandlers(io: SocketServer): void {
         // drops where chipsReturned was never set.
         await clearSessionDisconnected(userId, tableId);
 
-        const session = await prisma.tableSession.findUnique({
+        let session = await prisma.tableSession.findUnique({
           where: { tableId_userId: { tableId, userId } },
           include: { user: { select: { username: true, displayName: true, avatarId: true } } },
         });
         if (!session?.isActive) {
-          // High-signal log line for Symptom 1/2: this fires when the DB
-          // session has been swept (isActive=false) between the soft-leave
-          // and the rejoin attempt. Cross-reference timestamp against the
-          // matching auto_leave_success and disconnect_sweep_tick markers
-          // to confirm the race window.
+          // Auto-recover from a swept session. The sweeper-vs-rejoin race
+          // (Symptom 1/2): disconnect sweeper flipped isActive=false between
+          // the soft-leave and this rejoin attempt, leaving the row in place
+          // with the seatIndex and currentStack still set. reactivateSession
+          // re-debits the wallet, clears the away markers, and flips it back
+          // active in a single transaction. If it returns non-null, fall
+          // through to the normal join path below (re-read the session so
+          // the user-include is fresh). Returns null when there's genuinely
+          // no session row at all — that's the real NOT_SEATED case.
+          try {
+            const reactivated = await lobbyService.reactivateSession(userId, tableId);
+            if (reactivated) {
+              emitChipsUpdated(io, userId, reactivated.newBalance, 'reactivate_swept_session');
+              session = await prisma.tableSession.findUnique({
+                where: { tableId_userId: { tableId, userId } },
+                include: { user: { select: { username: true, displayName: true, avatarId: true } } },
+              });
+            }
+          } catch (err: any) {
+            if (err?.code === 'TABLE_CLOSED' || err?.code === 'INSUFFICIENT_CHIPS' || err?.code === 'NOT_FOUND') {
+              logger.warn(`[STATE] event=ws_join_table_error reason=${err.code} userId=${userId} tableId=${tableId} message="${err.message}"`);
+              emit(socket, 'error', { code: err.code, message: err.message });
+              return;
+            }
+            throw err;
+          }
+        }
+        if (!session?.isActive) {
+          // Reactivation returned null (no session row) — genuine NOT_SEATED.
           logger.warn(`[STATE] event=ws_join_table_error reason=NOT_SEATED userId=${userId} tableId=${tableId} sessionFound=${!!session} isActive=${session?.isActive ?? null}`);
           emit(socket, 'error', { code: 'NOT_SEATED', message: 'Not seated at this table' });
           return;
