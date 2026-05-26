@@ -516,6 +516,101 @@ export async function rejoinRedebit(
   return { newBalance: post.chipBalance.toString(), didDebit: true };
 }
 
+// ─── Reactivate swept session (Fix #1 — rejoin race recovery) ────────────────
+// Recovers a session that the disconnect/idle sweeper marked inactive while
+// the user was momentarily away. Pre-fix, that branch hard-rejected the rejoin
+// with NOT_SEATED — even though the table is still open and the user owns
+// the chips. This function flips the existing row back to active in place
+// (preserving seatIndex and currentStack) and re-debits the wallet at the
+// preserved stack so the in-game HUD lines up with the live engine seat.
+//
+// Returns null when there's no inactive session to recover (caller falls
+// through to the original NOT_SEATED reject — meaning the user truly never
+// sat here). Throws TABLE_CLOSED when the row is inactive AND the table
+// itself was closed by forceCloseIdleTable or the last-player-out path —
+// reactivation would require resurrecting a closed table, which is a
+// different flow (fresh HTTP join against a new table).
+//
+// Throws INSUFFICIENT_CHIPS when the user spent the cashed-out chips
+// elsewhere between leave and rejoin — same semantics as rejoinRedebit so
+// the iOS error surface stays consistent across the two paths.
+export async function reactivateSession(
+  userId: string,
+  tableId: string,
+): Promise<{ newBalance: string; seatIndex: number } | null> {
+  logger.info(`[STATE] event=reactivate_session_start userId=${userId} tableId=${tableId}`);
+  const session = await prisma.tableSession.findUnique({
+    where: { tableId_userId: { tableId, userId } },
+  });
+  if (!session) {
+    logger.info(`[STATE] event=reactivate_session_noop reason=no_session userId=${userId} tableId=${tableId}`);
+    return null;
+  }
+  if (session.isActive) {
+    // Caller should have taken the normal rejoin path; defensive no-op so a
+    // belt-and-suspenders call site doesn't double-debit.
+    logger.info(`[STATE] event=reactivate_session_noop reason=already_active userId=${userId} tableId=${tableId} sessionId=${session.id}`);
+    return null;
+  }
+
+  const table = await prisma.pokerTable.findUnique({ where: { id: tableId } });
+  if (!table) {
+    logger.warn(`[STATE] event=reactivate_session_error reason=NOT_FOUND userId=${userId} tableId=${tableId} sessionId=${session.id}`);
+    throw { code: 'NOT_FOUND', message: 'Table not found' };
+  }
+  if (table.status === 'CLOSED') {
+    logger.warn(`[STATE] event=reactivate_session_error reason=TABLE_CLOSED userId=${userId} tableId=${tableId} sessionId=${session.id}`);
+    throw { code: 'TABLE_CLOSED', message: 'This table is closed' };
+  }
+
+  const user = await prisma.user.findUnique({ where: { id: userId } });
+  const stack = session.currentStack;
+  if (!user || user.chipBalance < stack) {
+    logger.warn(`[STATE] event=reactivate_session_error reason=INSUFFICIENT_CHIPS userId=${userId} tableId=${tableId} need=${stack.toString()} have=${(user?.chipBalance ?? 0n).toString()}`);
+    throw {
+      code: 'INSUFFICIENT_CHIPS',
+      message: `Not enough chips to reseat. Need ${stack.toString()} but have ${(user?.chipBalance ?? 0n).toString()}.`,
+    };
+  }
+
+  // Atomic re-seat: flip the row active, clear all "user is away" markers,
+  // debit the wallet, and write the buy-in transaction in one shot. The
+  // (tableId, seatIndex) unique constraint guarantees nobody else has taken
+  // this seat while we were inactive — the row stayed put with the index
+  // claimed, so the flip is collision-free.
+  const post = await prisma.$transaction(async (tx) => {
+    await tx.tableSession.update({
+      where: { id: session.id },
+      data: {
+        isActive: true,
+        chipsReturned: false,
+        disconnectedAt: null,
+        leftAt: null,
+      },
+    });
+    const u = await tx.user.update({
+      where: { id: userId },
+      data: { chipBalance: { decrement: stack } },
+      select: { chipBalance: true },
+    });
+    await tx.chipTransaction.create({
+      data: {
+        // Match the rejoinRedebit / buy-in convention: recipient=user,
+        // negative amount denotes chips leaving the wallet to the table.
+        recipientId: userId,
+        amount: -stack,
+        type: 'BUY_IN',
+        tableId,
+        description: 'Reactivate swept session',
+      },
+    });
+    return u;
+  });
+
+  logger.info(`[STATE] event=reactivate_session_success userId=${userId} tableId=${tableId} sessionId=${session.id} stack=${stack.toString()} seatIndex=${session.seatIndex} newBalance=${post.chipBalance.toString()}`);
+  return { newBalance: post.chipBalance.toString(), seatIndex: session.seatIndex };
+}
+
 // ─── Top Up Chips (mid-table rebuy) ───────────────────────────────────────────
 // Lets a seated player add chips to their stack. Two execution paths share
 // the same validation here:
