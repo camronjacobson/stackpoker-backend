@@ -274,3 +274,44 @@ than nothing because it gives the user no actionable info. Mirror the
 existing toasts which pattern-match on a concrete error enum and
 produce specific copy ("Table is full", "All bot profiles already
 seated", etc.).
+
+---
+
+## Cosmetics — `avatar_frame_mythic_inferno` interim purchase placement
+
+**Recorded:** 2026-05-20
+
+`avatar_frame_mythic_inferno` is currently seeded with
+`unlockCondition = "purchase"` and `priceChips = 200000` in both
+`prisma/seeds/cosmetics_catalog.json` and the iOS
+`Features/Cosmetics/Resources/cosmetics_catalog.json`. This is an
+**interim** placement so the mythic tier is actually purchasable in
+the store while the season pass feature is unbuilt.
+
+### Original intent
+
+Mythic-tier frames were designed as season-pass / event-exclusive
+rewards (`unlockCondition = "seasonPass"`), which routes them to the
+"Earned by Play" aspirational list under Identity rather than the
+buyable Style → Avatar Frames section. With no season pass system to
+earn from, the frame was visible but unreachable — defeating the
+point of shipping the asset.
+
+### When to revisit
+
+Promote back to season-pass / event-exclusive when **either** ships:
+- The season pass / battle-pass system lands and has at least one
+  active season to gate this frame behind.
+- A higher-tier mythic frame is introduced and inferno needs to be
+  demoted to keep apex tier scarce.
+
+At that point: flip `unlockCondition` back to `"seasonPass"` (or the
+new earn condition), remove `priceChips`, re-seed prod, and either
+grandfather existing purchasers (preferred) or refund + revoke.
+
+### Why not delete the entry instead
+
+Keeping the catalog row stable across this transition means existing
+purchasers retain ownership records. Don't change the `id` —
+`avatar_frame_mythic_inferno` is now the stable handle for any
+account that bought it during this window.

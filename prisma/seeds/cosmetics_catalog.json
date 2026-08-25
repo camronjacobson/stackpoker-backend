@@ -205,8 +205,9 @@
       "name": "Mythic Inferno",
       "category": "avatarFrame",
       "rarity": "mythic",
+      "priceChips": 200000,
       "previewAssetName": "cosmetic_avatarFrame_mythic_inferno",
-      "unlockCondition": "seasonPass"
+      "unlockCondition": "purchase"
     },
 
     {

@@ -2,9 +2,8 @@
 # .env holds DATABASE_URL, JWT_SECRET, JWT_REFRESH_SECRET, REDIS_URL.
 # Never commit these — leak = full account takeover for every user.
 # .env.example is fine to commit (template with placeholder values).
-.env
-.env.local
-.env.*.local
+.env*
+!.env.example
 *.pem
 *.key
 
